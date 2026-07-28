@@ -8,6 +8,8 @@ plant-emergence phenotyping.
 
 *DPIRD × APPN · NUE + Root Phenotyping trials (Muresk / York).*
 
+**Author & maintainer:** Ibrahim ([@IbrahimUWA](https://github.com/IbrahimUWA)).
+
 ## Documentation & downloads
 
 - **User guide, presentation & demo script:** see [`docs/`](docs/)
