@@ -25,3 +25,16 @@ comparison.txt
 Thumbs.db
 Desktop.ini
 .DS_Store
+
+# ---- extra build/backup copies ----
+/dist*/
+/build*/
+*.bak-*
+*.log
+/tools/__pycache__/
+
+*.exe
+/tools/*.txt
+
+/tools/
+

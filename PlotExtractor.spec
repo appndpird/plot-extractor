@@ -3,7 +3,7 @@
 import os
 from PyInstaller.utils.hooks import collect_all, collect_submodules
 
-APP = r"F:/Ibrahim's Workspace2/Conversion/PlotExtractor"
+APP = SPECPATH          # build whichever copy of the project this spec sits in
 
 datas, binaries, hidden = [], [], []
 # Big native packages: collect the module, its DLLs and data files.
@@ -17,7 +17,14 @@ for pkg in ("Metashape", "rasterio", "pyproj", "shapely", "PIL"):
 hidden += collect_submodules("rasterio")
 hidden += ["PIL.ImageTk", "PIL.ImageCms", "PIL._tkinter_finder",
            "rasterio.sample", "rasterio._features", "rasterio.vrt",
-           "rasterio.control", "shapely.geometry", "shapefile"]
+           "rasterio.control", "shapely.geometry", "shapefile",
+           # the grid-designer tab is imported lazily inside main(), so name it
+           # explicitly rather than relying on bytecode scanning
+           "grid_designer",
+           # the "Correct grid to rows" button imports this lazily
+           "grid_refit",
+           # the "Training tiles" tab imports this lazily
+           "tiler"]
 
 # app assets (logos + icon) -> _internal/assets, found via sys._MEIPASS
 datas += [(os.path.join(APP, "assets"), "assets")]

@@ -62,6 +62,321 @@ def _point_in_ring(x, y, ring):
     return inside
 
 
+def _clip_poly_rect(poly, w, h):
+    """Sutherland-Hodgman clip of a polygon [(x,y), ...] to the rectangle
+    [0,w] x [0,h]. Returns the clipped polygon (possibly empty)."""
+    def clip(pts, inside, inter):
+        out = []
+        n = len(pts)
+        for i in range(n):
+            a = pts[i]
+            b = pts[(i + 1) % n]
+            ia, ib = inside(a), inside(b)
+            if ia:
+                out.append(a)
+                if not ib:
+                    out.append(inter(a, b))
+            elif ib:
+                out.append(inter(a, b))
+        return out
+
+    def ix(a, b, xc):                                   # crossing of a-b with x=xc
+        t = (xc - a[0]) / (b[0] - a[0]) if b[0] != a[0] else 0.0
+        return (xc, a[1] + t * (b[1] - a[1]))
+
+    def iy(a, b, yc):                                   # crossing of a-b with y=yc
+        t = (yc - a[1]) / (b[1] - a[1]) if b[1] != a[1] else 0.0
+        return (a[0] + t * (b[0] - a[0]), yc)
+
+    pts = list(poly)
+    for inside, inter in (
+            (lambda p: p[0] >= 0.0, lambda a, b: ix(a, b, 0.0)),
+            (lambda p: p[0] <= w,   lambda a, b: ix(a, b, w)),
+            (lambda p: p[1] >= 0.0, lambda a, b: iy(a, b, 0.0)),
+            (lambda p: p[1] <= h,   lambda a, b: iy(a, b, h))):
+        if not pts:
+            return []
+        pts = clip(pts, inside, inter)
+    return pts
+
+
+def frame_coverage(quad_px, w, h):
+    """Fraction (0..1) of a plot quad, projected into a w x h frame, that is
+    actually inside the frame. Exact polygon clip - far more informative than
+    counting how many of the 4 corners land in the image (the old measure),
+    which is 2/4 for both a frame holding 51% of the plot and one holding 95%."""
+    a0 = _ring_area(quad_px)
+    if a0 <= 1e-9:
+        return 0.0
+    cl = _clip_poly_rect(quad_px, float(w), float(h))
+    if len(cl) < 3:
+        return 0.0
+    return max(0.0, min(1.0, _ring_area(cl) / a0))
+
+
+# --------------------------------------------------------------------------
+# Exact rectification (projected mesh) + minimum-error seam
+# --------------------------------------------------------------------------
+MESH_STEP_PX = 96           # target output-pixel size of one mesh cell
+MESH_MAX_CELLS = 512        # per axis
+
+
+def mesh_dims(wpx, hpx, step=MESH_STEP_PX):
+    """Number of mesh cells across/down for an output crop of wpx x hpx.
+
+    The cell size matters because the plot surface is NOT smooth at plot scale:
+    the seed ridges are ~1-3 cm high and ~20 cm apart, so a mesh coarser than
+    the ridge spacing cannot follow the relief and the two frames of a stitch
+    still disagree over a ridge. Measured cross-frame misregistration on OZ
+    Barley York: 15-24 px mean with one quad, 4-6 px at 256 px cells,
+    ~1-2 px at 64-96 px cells."""
+    nx = max(2, min(MESH_MAX_CELLS, int(math.ceil(wpx / float(step)))))
+    ny = max(2, min(MESH_MAX_CELLS, int(math.ceil(hpx / float(step)))))
+    return nx, ny
+
+
+def mesh_uv_nodes(ring, nx, ny):
+    """Ground positions of the (nx+1) x (ny+1) mesh nodes, bilinearly spread over
+    the plot quad `ring` = [A, B, C, D]. u runs A->B (output x), v runs A->D
+    (output y) - the same convention the QUAD warp used for its 4 corners."""
+    A, B, C, D = ring
+    out = []
+    for j in range(ny + 1):
+        v = j / float(ny)
+        for i in range(nx + 1):
+            u = i / float(nx)
+            out.append([(1 - u) * (1 - v) * A[k] + u * (1 - v) * B[k]
+                        + u * v * C[k] + (1 - u) * v * D[k] for k in (0, 1)])
+    return out
+
+
+def build_pil_mesh(src_nodes, nx, ny, wpx, hpx):
+    """Turn a grid of source-pixel coordinates into PIL's MESH transform data.
+
+    Each cell becomes (destination box, source quad). Because every frame is
+    sampled at the SAME ground nodes, two frames rectified through their own
+    meshes land on the ground identically - which is what stops a plant from
+    appearing twice across a stitch boundary. Cells with a node that failed to
+    project are dropped (they fall outside the frame anyway and would be black).
+    """
+    mesh = []
+    for j in range(ny):
+        y0 = int(round(hpx * j / float(ny)))
+        y1 = int(round(hpx * (j + 1) / float(ny)))
+        if y1 <= y0:
+            continue
+        for i in range(nx):
+            x0 = int(round(wpx * i / float(nx)))
+            x1 = int(round(wpx * (i + 1) / float(nx)))
+            if x1 <= x0:
+                continue
+            ul = src_nodes[j * (nx + 1) + i]
+            ur = src_nodes[j * (nx + 1) + i + 1]
+            ll = src_nodes[(j + 1) * (nx + 1) + i]
+            lr = src_nodes[(j + 1) * (nx + 1) + i + 1]
+            if ul is None or ur is None or ll is None or lr is None:
+                continue
+            # PIL quad order: upper-left, lower-left, lower-right, upper-right
+            mesh.append(((x0, y0, x1, y1),
+                         (ul[0], ul[1], ll[0], ll[1], lr[0], lr[1], ur[0], ur[1])))
+    return mesh
+
+
+def min_error_seam(np, g_old, g_new, filled, vmask, slack=300, bias=0.05,
+                   maxstep=4):
+    """Choose where two frames should hand over to each other.
+
+    `filled` = pixels the composite already holds, `vmask` = pixels the new frame
+    can supply. Letting the new frame fill only the holes puts the boundary
+    exactly on the old frame's footprint edge, wherever that happens to land -
+    including straight through a seedling, which is then drawn twice because its
+    top is displaced differently in the two views. So the boundary is allowed to
+    move up to `slack` pixels back into the overlap and is routed along the path
+    where the two frames look most alike, i.e. over bare soil. Classic
+    minimum-error boundary cut, solved with dynamic programming.
+
+    `slack` is deliberately small (300 px is ~10 cm here, several times a
+    seedling) and `bias` pulls the path back towards the footprint edge: the
+    point is to step around a plant, NOT to hand half the plot to a second
+    frame. Letting the seam settle mid-overlap looks tidy but throws away the
+    best frame's pixels over a large area.
+
+    Returns a dict (take-mask, path, orientation) or None when the geometry
+    isn't a clean band, in which case the caller falls back to plain hole
+    filling.
+    """
+    ov = vmask & filled
+    need = vmask & (~filled)
+    if not need.any() or ov.sum() < 5000:
+        return None
+    # Which way does the boundary run? Count membership flips between vertical
+    # vs horizontal neighbours; the seam is a function of the other axis.
+    m = need.astype(np.int8) - ov.astype(np.int8)
+    flips_v = int(np.count_nonzero(np.diff(m, axis=0)))     # changes down a column
+    flips_h = int(np.count_nonzero(np.diff(m, axis=1)))     # changes along a row
+    transposed = flips_h > flips_v
+    if transposed:
+        g_old = g_old.T; g_new = g_new.T
+        ov = ov.T; need = need.T; vmask = vmask.T
+    H, W = ov.shape
+    idx = np.arange(H)[:, None]
+    ov_any = ov.any(0)
+    need_any = need.any(0)
+    active = ov_any & need_any
+    if active.sum() < 0.2 * W:
+        return None
+    # per-column overlap band and which side of it the new pixels sit on
+    big = H + 10
+    lo = np.where(ov_any, np.where(ov, idx, big).min(0), 0)
+    hi = np.where(ov_any, np.where(ov, idx, -1).max(0), -1)
+    need_c = np.where(need_any, np.where(need, idx, 0).sum(0) /
+                      np.maximum(need.sum(0), 1), 0.0)
+    ov_c = np.where(ov_any, np.where(ov, idx, 0).sum(0) /
+                    np.maximum(ov.sum(0), 1), 0.0)
+    side_col = np.sign(need_c - ov_c)[active]
+    if side_col.size == 0:
+        return None
+    side = 1.0 if side_col.sum() >= 0 else -1.0        # +1: new frame is BELOW
+    # The plain hole-fill boundary, per column: the last overlap row on the side
+    # the new pixels come from. The seam may retreat up to `slack` from it.
+    edge = hi if side > 0 else lo
+    slack = max(8, int(slack))
+    if side > 0:
+        Lo = int(max(0, edge[active].min() - slack))
+        Hi = int(min(H - 1, edge[active].max()))
+    else:
+        Lo = int(max(0, edge[active].min()))
+        Hi = int(min(H - 1, edge[active].max() + slack))
+    if Hi - Lo < 2:
+        return None
+    band = slice(Lo, Hi + 1)
+    BH = Hi - Lo + 1
+    if BH * W > 120_000_000:                            # keep the DP affordable
+        return None
+    cost = np.abs(g_old[band].astype(np.float32) - g_new[band].astype(np.float32))
+    rows = np.arange(Lo, Hi + 1, dtype=np.float32)[:, None]
+    # legal: inside the overlap AND within `slack` of this column's own edge
+    eg = edge[None, :].astype(np.float32)
+    if side > 0:
+        legal = ov[band] & (rows <= eg) & (rows >= eg - slack)
+    else:
+        legal = ov[band] & (rows >= eg) & (rows <= eg + slack)
+    PEN = 1e4
+    cost = np.where(legal, cost, PEN)
+    if bias:                    # pull back towards the footprint edge
+        cost = cost + bias * np.abs(rows - eg)
+    # DP left->right. The step limit has to be more than 1 row per column: a
+    # seedling is only ~30-90 px across, and at +/-1 the path needs ~50 columns
+    # to descend past it and 50 more to climb back, so it could not detour around
+    # anything narrower than ~100 px - exactly the obstacles that matter here.
+    ms = max(1, int(maxstep))
+    offs = list(range(-ms, ms + 1))                 # back value = prev row - cur row
+    acc = np.empty((BH, W), np.float32)
+    back = np.zeros((BH, W), np.int8)
+    acc[:, 0] = cost[:, 0]
+    stk = np.empty((len(offs), BH), np.float32)
+    ar = np.arange(BH)
+    offa = np.asarray(offs, np.int8)
+    for c in range(1, W):
+        prev = acc[:, c - 1]
+        for i, d in enumerate(offs):
+            col = stk[i]
+            if d == 0:
+                col[:] = prev
+            elif d < 0:                             # came from |d| rows above
+                col[:-d] = np.inf
+                col[-d:] = prev[:d]
+            else:                                   # came from d rows below
+                col[-d:] = np.inf
+                col[:-d] = prev[d:]
+        k = np.argmin(stk, 0)
+        acc[:, c] = stk[k, ar] + cost[:, c]
+        back[:, c] = offa[k]
+    path = np.empty(W, np.int32)
+    path[W - 1] = int(np.argmin(acc[:, W - 1]))
+    for c in range(W - 1, 0, -1):
+        path[c - 1] = path[c] + int(back[path[c], c])
+    path = np.clip(path + Lo, 0, H - 1)
+    # columns with no overlap keep the plain hole-fill boundary
+    take = need.copy()
+    if side > 0:
+        seam_take = idx > path[None, :]
+    else:
+        seam_take = idx < path[None, :]
+    take |= (ov & seam_take & active[None, :])
+    take &= vmask
+    return dict(take=(take.T if transposed else take), path=path,
+                transposed=transposed, side=side, active=active,
+                cut=float(np.mean(np.abs(np.diff(path)))))
+
+
+def feather_seam(np, out, ra, seam, width=600, halfband=24, block=256):
+    """Erase the residual brightness/colour LINE along a stitch boundary WITHOUT
+    mixing pixels from two frames.
+
+    The step across the seam is measured column-by-column in a thin band on
+    either side, smoothed hard along the seam, and then added to the incoming
+    frame as an offset that fades to zero `width` pixels away. Only a smooth
+    low-frequency offset is applied - every output pixel keeps 100% of one
+    frame's texture, so nothing is averaged and nothing is duplicated.
+
+    `ra` (float32) is corrected IN PLACE and clipped to 0..255. Everything is
+    done in row blocks: a 13000x3400 crop would otherwise need ~1 GB of
+    full-size float temporaries per worker, times however many cores are busy.
+    """
+    path = seam['path']
+    side = seam['side']
+    active = seam['active']
+    # transpose() returns a view, so in-place writes reach the caller's array
+    o = out.transpose(1, 0, 2) if seam['transposed'] else out
+    r = ra.transpose(1, 0, 2) if seam['transposed'] else ra
+    H, W = o.shape[:2]
+    pf = path[None, :].astype(np.float32)
+    sgn = np.float32(1.0 if side >= 0 else -1.0)
+
+    def rel_of(y0, y1):
+        rows = np.arange(y0, y1, dtype=np.float32)[:, None]
+        return (rows - pf) * sgn                    # <0 = old side, >0 = new side
+
+    # --- measure the step across the seam, per column, in thin bands ---
+    no = np.zeros(W, np.float32); nn = np.zeros(W, np.float32)
+    so = np.zeros((3, W), np.float32); sn = np.zeros((3, W), np.float32)
+    for y0 in range(0, H, block):
+        y1 = min(H, y0 + block)
+        rel = rel_of(y0, y1)
+        ob = (rel < 0) & (rel >= -halfband)
+        nb = (rel >= 0) & (rel <= halfband)
+        if not (ob.any() or nb.any()):
+            continue
+        no += ob.sum(0); nn += nb.sum(0)
+        for c in range(3):
+            so[c] += (o[y0:y1, :, c] * ob).sum(0)
+            sn[c] += (r[y0:y1, :, c] * nb).sum(0)
+    good = (no > 4) & (nn > 4) & active
+    step = np.zeros((3, W), np.float32)
+    if good.any():
+        k = max(3, int(W / 12) | 1)
+        ker = np.ones(k, np.float32)
+        den = np.convolve(good.astype(np.float32), ker, 'same')
+        for c in range(3):
+            d = np.zeros(W, np.float32)
+            d[good] = so[c][good] / no[good] - sn[c][good] / nn[good]
+            # smooth hard along the seam, and carry the value into dead columns
+            num = np.convolve(np.where(good, d, 0.0), ker, 'same')
+            step[c] = np.clip(np.where(den > 0, num / np.maximum(den, 1e-6), 0.0),
+                              -60.0, 60.0)
+
+    # --- apply it, fading out away from the seam ---
+    for y0 in range(0, H, block):
+        y1 = min(H, y0 + block)
+        ramp = np.clip(1.0 - np.maximum(rel_of(y0, y1), 0.0) / float(width),
+                       0.0, 1.0)
+        for c in range(3):
+            r[y0:y1, :, c] += step[c][None, :] * ramp
+    np.clip(ra, 0, 255, out=ra)
+    return ra
+
+
 def _tilt_from_vertical(pu):
     """Acute angle (deg, 0-90) between a plot's long edge and the image vertical,
     from its 4 corners [A,B,C,D] in pixel coords. 0 = already upright."""
@@ -154,9 +469,97 @@ def safe_name(val):
 # --------------------------------------------------------------------------
 # Extraction engine (worker thread)
 # --------------------------------------------------------------------------
-def detect_row_fit(im, rows_target=0, mode='width', buffer_frac=0.5):
-    """Find the planted crop rows (vertical) in a rectified plot image and return
-    a pixel crop box that tightly encloses them. Uses the ROW/RIDGE periodicity
+def _periodicity(prof):
+    """Strength of the dominant ridge/row oscillation in a 1-D profile."""
+    import numpy as np
+    n = len(prof)
+    if n < 32:
+        return 0.0
+    x = np.arange(n, dtype='float64')
+    p = prof - np.polyval(np.polyfit(x, prof, 3), x)      # drop illumination trend
+    f = np.abs(np.fft.rfft((p - p.mean()) * np.hanning(n)))
+    lo, hi = max(2, n // 120), max(3, n // 5)
+    if hi <= lo:
+        return 0.0
+    band = f[lo:hi]
+    return float(band.max() / (band.mean() + 1e-9))
+
+
+def _across_row_axis(im, hint=None):
+    """Which image axis runs ACROSS the planted rows: 'x' (rows vertical) or
+    'y' (rows horizontal). Rows run along the plot's LONG axis, so the
+    across-row axis is the SHORT image axis - which side that is depends on the
+    shapefile's vertex order, so it must be measured, not assumed. Near-square
+    crops fall back to whichever axis carries the stronger row periodicity."""
+    if hint in ('x', 'y'):
+        return hint
+    W, H = im.size
+    ar = W / float(H or 1)
+    if ar <= 0.8:
+        return 'x'
+    if ar >= 1.25:
+        return 'y'
+    import numpy as np
+    a = np.asarray(im.resize((min(W, 700), min(H, 700))).convert('L')).astype('float32')
+    return 'x' if _periodicity(a.mean(0)) >= _periodicity(a.mean(1)) else 'y'
+
+
+def _refit_gcps_box(gcps, x0, y0, x1, y1):
+    """Rebuild 4 corner GCPs for a sub-window (x0,y0,x1,y1) of the current frame.
+
+    Same bilinear refit used when auto-fit trims a crop: fit
+    v = a + b*row + c*col + d*row*col through the existing corner GCPs, then
+    evaluate at the new corners. Filtering GCPs by whether they fall inside the
+    window is NOT equivalent - the corners always sit outside it, so filtering
+    leaves none at all.
+    """
+    if len(gcps) < 4:
+        return [(r - y0, c - x0, lon, lat, z) for (r, c, lon, lat, z) in gcps]
+    A = [[1.0, g[0], g[1], g[0] * g[1]] for g in gcps]
+    coefs = []
+    for k in (2, 3, 4):
+        coefs.append(_lstsq4(A, [g[k] for g in gcps]))
+    out = []
+    for r_src, r_dst in ((y0, 0.0), (y1, float(y1 - y0))):
+        for c_src, c_dst in ((x0, 0.0), (x1, float(x1 - x0))):
+            vals = [cf[0] + cf[1] * r_src + cf[2] * c_src + cf[3] * r_src * c_src
+                    for cf in coefs]
+            out.append((r_dst, c_dst, vals[0], vals[1], vals[2]))
+    return out
+
+
+def _lstsq4(A, b):
+    """Least-squares solve of a 4-column design matrix without numpy.
+
+    Used to refit GCPs when auto-fit trims the crop (see _apply_auto_fit). Solves
+    the 4x4 normal equations by Gaussian elimination with partial pivoting; that
+    is plenty for 4 corner points and keeps this module free of a numpy import at
+    module scope.
+    """
+    n = 4
+    M = [[sum(A[k][i] * A[k][j] for k in range(len(A))) for j in range(n)]
+         + [sum(A[k][i] * b[k] for k in range(len(A)))] for i in range(n)]
+    for i in range(n):
+        p = max(range(i, n), key=lambda r: abs(M[r][i]))
+        if abs(M[p][i]) < 1e-12:
+            raise ValueError("singular GCP design matrix")
+        M[i], M[p] = M[p], M[i]
+        inv = 1.0 / M[i][i]
+        for j in range(i, n + 1):
+            M[i][j] *= inv
+        for r in range(n):
+            if r == i:
+                continue
+            f = M[r][i]
+            if f:
+                for j in range(i, n + 1):
+                    M[r][j] -= f * M[i][j]
+    return [M[i][n] for i in range(n)]
+
+
+def detect_row_fit(im, rows_target=0, mode='width', buffer_frac=0.5, across=None):
+    """Find the planted crop rows in a rectified plot image and return a pixel
+    crop box that tightly encloses them. Uses the ROW/RIDGE periodicity
     (detrended-brightness oscillation) reinforced by greenness, so it works even
     before emergence and doesn't chase stray edge grass.
 
@@ -165,9 +568,23 @@ def detect_row_fit(im, rows_target=0, mode='width', buffer_frac=0.5):
 
     mode: 'width' (band width, keep original centre) | 'width_shift' (band as
     detected, recentre on rows) | 'width_length' (also trim along-row ends).
-    Returns dict(box=(x0,x1,y0,y1), rows, spacing_px, peaks) or None.
+    `across` is the image axis running across the rows ('x' = rows vertical,
+    'y' = rows horizontal); None decides from the crop shape.
+    Returns dict(box=(x0,x1,y0,y1), rows, spacing_px, peaks, across) or None.
     """
     import numpy as np
+    from PIL import Image
+    if _across_row_axis(im, across) == 'y':
+        # rows are horizontal bands here: detect on the transposed image (which
+        # puts them upright) and map the box back, so the trimming happens
+        # ACROSS the rows instead of along the plot's length
+        r = detect_row_fit(im.transpose(Image.TRANSPOSE), rows_target=rows_target,
+                           mode=mode, buffer_frac=buffer_frac, across='x')
+        if r:
+            bx0, bx1, by0, by1 = r['box']
+            r['box'] = (by0, by1, bx0, bx1)
+            r['across'] = 'y'
+        return r
     W0, H0 = im.size
     ds = max(1, int(max(W0, H0) / 1800))
     a = np.asarray(im.resize((max(1, W0 // ds), max(1, H0 // ds))).convert('RGB')
@@ -243,7 +660,7 @@ def detect_row_fit(im, rows_target=0, mode='width', buffer_frac=0.5):
         if len(yon) > H * 0.3:
             y0, y1 = int(yon[0]), int(yon[-1])
     return dict(box=(int(x0 * ds), int(x1 * ds), int(y0 * ds), int(y1 * ds)),
-                rows=len(grp), spacing_px=sp * ds,
+                rows=len(grp), spacing_px=sp * ds, across='x',
                 peaks=[int(p * ds) for p in grp])
 
 
@@ -498,7 +915,17 @@ def run_extraction(p, log, set_progress, cancel):
 
     do_raw = bool(p.get('do_raw', True))
     do_ortho = bool(p.get('do_ortho', False))
-    raw_mode = (p.get('raw_mode') or 'auto').lower()   # auto | bbox | mask | rectify
+    raw_mode = (p.get('raw_mode') or 'auto').lower()   # auto|bbox|mask|rectify|native|best
+    smart_seam = bool(p.get('smart_seam', True))       # min-error seam + feathering
+    GAPFILL_N = max(2, int(p.get('gapfill_frames') or 8))   # candidates offered to fill
+    mesh_step = max(16, int(p.get('mesh_step') or MESH_STEP_PX))
+    seam_map = bool(p.get('seam_map', False))   # QC: dump a per-pixel source map
+    seam_slack = max(8, int(p.get('seam_slack_px') or 300))  # how far a seam may
+    #        retreat into the overlap to step around a plant (px of the output crop)
+    CAND_REPORT_N = 12                                 # rows per plot in candidates.csv
+    want_cand_csv = bool(p.get('candidates_csv', True))
+    candidates_csv = [] if (do_raw and want_cand_csv) else None
+    _cand_lock = threading.Lock()
     to_srgb = bool(p.get('to_srgb', False))            # convert raw crops to sRGB
     auto_fit = bool(p.get('auto_fit', False))          # snap crop to detected rows
     fit_rows = int(p.get('rows_per_plot') or 0)        # target rows/plot (0=all found)
@@ -509,7 +936,7 @@ def run_extraction(p, log, set_progress, cancel):
             f"{'target ' + str(fit_rows) + ' rows' if fit_rows else 'all detected rows'}, "
             f"probe ±{fit_probe_m:.2f} m). Rows clipped by the grid are recovered by "
             f"rendering wider, then the crop is snapped to the rows.")
-        if raw_mode not in ('rectify', 'auto'):
+        if raw_mode not in ('rectify', 'auto', 'best'):
             log("[!] Auto-fit needs an upright crop - forcing raw style to 'Rectified'.")
             raw_mode = 'rectify'
     if do_raw and to_srgb:
@@ -522,8 +949,18 @@ def run_extraction(p, log, set_progress, cancel):
                      "rectify only plots tilted >3 deg)",
              'bbox': "Raw crop style: bounding box (whole tilted plot + surrounds)",
              'mask': "Raw crop style: masked to plot polygon (outside set to black)",
-             'rectify': "Raw crop style: rectified to an upright plot rectangle"}
+             'rectify': "Raw crop style: rectified to an upright plot rectangle",
+             'best': "Raw crop style: BEST single frame per plot - the one image "
+                     "covering most of the plot, rectified, NO stitching"}
             .get(raw_mode, f"Raw crop style: {raw_mode}"))
+        log("Rectification: exact projected mesh (full camera model incl. lens "
+            f"distortion, ~{mesh_step}px cells) - all frames share one ground "
+            "grid, so they register to each other")
+        if raw_mode in ('rectify', 'auto'):
+            log("Stitching: " + ("minimum-error seam through the overlap + "
+                                 "feathered radiometric match (no pixel blending)"
+                                 if smart_seam else
+                                 "plain gap fill at the frame footprint boundary"))
     if do_ortho and ch.orthomosaic is None:
         log("[!] Orthomosaic crops requested but the project has no orthomosaic - skipping those.")
         do_ortho = False
@@ -537,6 +974,14 @@ def run_extraction(p, log, set_progress, cancel):
     n_per_plot = max(1, int(p.get('n_per_plot') or 1))
     fmt = (p.get('format') or 'JPEG').upper()
     geotag = fmt.startswith('GEO')
+    # CRS for the GeoTIFF ground control points. Coordinates are transformed into
+    # it, not relabelled; blank keeps the internal EPSG:4326.
+    try:
+        _GCP_EPSG[0] = int(str(p.get('gcp_epsg') or '').strip() or 0) or None
+    except (TypeError, ValueError):
+        _GCP_EPSG[0] = None
+    if geotag and _GCP_EPSG[0]:
+        log(f"GCP CRS: writing ground control points in EPSG:{_GCP_EPSG[0]}")
     if geotag:
         ext, save_kw = '.tif', dict(compression='tiff_lzw')        # lossless GeoTIFF
         import rasterio                                            # fail early if missing
@@ -575,7 +1020,18 @@ def run_extraction(p, log, set_progress, cancel):
     from collections import OrderedDict
     _img_lru = OrderedDict()          # path -> (RGB image, icc_profile_bytes)
     _img_lock = threading.Lock()
-    _cache_cap = max(2, workers + 1)
+    # Cap defaults to workers+1, which assumes one frame in flight per worker.
+    # That holds for plain crops, but a rectified crop needs every frame the plot
+    # touches, and auto-fit widens the render by 2*fit_probe_m so it touches more
+    # of them. workers*frames_per_plot then exceeds the cap, frames get evicted
+    # and re-read from disk, and throughput collapses (measured: 2.5 MB/s against
+    # 75.8 MB/s single-threaded on the same array). Override with PE_FRAME_CACHE
+    # when the source frames are large: each cached frame costs w*h*3 bytes
+    # (~366 MB for a 122 MP iXM-GS120 frame).
+    try:
+        _cache_cap = max(2, int(os.environ.get('PE_FRAME_CACHE', workers + 1)))
+    except (TypeError, ValueError):
+        _cache_cap = max(2, workers + 1)
 
     def load_image(path):
         """Return (decoded RGB image, icc_profile_bytes). Thread-safe."""
@@ -584,7 +1040,17 @@ def run_extraction(p, log, set_progress, cancel):
             if hit is not None:
                 _img_lru.move_to_end(path)
                 return hit
-        im = Image.open(path)
+        # Slurp the whole frame in ONE sequential read, then decode from memory.
+        # PIL streams a JPEG in small blocks as it decodes; with several worker
+        # threads interleaving those blocks across different files, a USB/spinning
+        # array degenerates into a seek storm and nothing finishes. Measured on the
+        # QNAP TR-004 that holds these frames: 8 threads reading whole files reach
+        # 109 MB/s, the same 8 threads letting PIL stream reach 2-5 MB/s. The blob
+        # is transient (one per in-flight frame, ~150 MB) and is freed once decoded.
+        import io as _io
+        with open(path, 'rb', buffering=0) as _fh:
+            _blob = _fh.read()
+        im = Image.open(_io.BytesIO(_blob))
         icc = im.info.get('icc_profile')          # grab before convert
         if im.mode != 'RGB':
             im = im.convert('RGB')
@@ -664,19 +1130,56 @@ def run_extraction(p, log, set_progress, cancel):
 
     RENDER_MAX_ANISO = 1.6            # frames more oblique than this smear when warped
 
+    def _rectify(job, layer, W, H):
+        """Warp ONE source frame onto the plot rectangle.
+
+        The mapping comes from the real camera model: a grid of ground points
+        spanning the plot was projected with cam.project() (full perspective +
+        lens distortion) in phase A, and PIL replays it as a piecewise mesh.
+        The old code fitted a single bilinear QUAD through only the plot's 4
+        projected corners, which on this data is wrong by 20-95 px in the middle
+        of a plot - so each frame bent the rows differently and two frames could
+        not agree at a stitch boundary. Sampling every frame at the SAME ground
+        nodes removes that error and makes the frames register to each other.
+        Returns (rgb uint8 HxWx3, valid mask HxW)."""
+        import numpy as np
+        im, icc = load_image(layer['path'])
+        nodes = layer.get('nodes')
+        if nodes:
+            nx, ny = layer['nx'], layer['ny']
+            data = build_pil_mesh(nodes, nx, ny, W, H)
+            if not data:
+                return (np.zeros((H, W, 3), np.uint8), np.zeros((H, W), bool))
+            rect = im.transform((W, H), Image.MESH, data, Image.BICUBIC)
+            vm = _white_full(im.size).transform((W, H), Image.MESH, data,
+                                                Image.NEAREST)
+        else:                                   # fallback: legacy 4-corner quad
+            A, B, C, D = layer['corners']
+            quad = [A[0], A[1], D[0], D[1], C[0], C[1], B[0], B[1]]
+            rect = im.transform((W, H), Image.QUAD, quad, Image.BICUBIC)
+            vm = _white_full(im.size).transform((W, H), Image.QUAD, quad,
+                                                Image.NEAREST)
+        rect = to_srgb_crop(rect, icc)
+        return (np.array(rect, dtype=np.uint8),      # writable copy
+                np.asarray(vm) > 127)
+
     def _render_fill(job):
-        """Rectify mode with gap-fill. Rectify candidate frames to the SAME plot
-        rectangle (they align pixel-for-pixel) and composite. Near-nadir frames
-        go first and do the bulk; oblique frames only patch remaining holes.
+        """Rectify mode with gap-fill. Every candidate frame is warped onto the
+        SAME ground grid (see _rectify), so they overlay pixel-for-pixel; the
+        near-nadir frames do the bulk and oblique frames only patch what is left.
 
         Each output pixel is native raw from EXACTLY ONE frame (one resample) -
-        no blending, no duplicated plants. Before a fill frame is dropped in, its
-        RGB is radiometrically matched to the already-placed pixels in the overlap
-        zone (per-channel gain), so the frame boundary has no brightness/colour
-        step (the 'two shades' seam). A per-pixel source-id map is kept so the
-        seam lines can be QC-checked for a plant sitting across a boundary."""
+        nothing is averaged, so a plant can never be blended into a ghost. Two
+        further steps kill the stitch artefacts:
+          * the hand-over boundary is routed by a minimum-error cut through the
+            overlap, so it runs over bare soil rather than slicing a seedling
+            (a plant sitting on the old footprint edge used to appear twice,
+            because its top is displaced differently in the two views);
+          * the leftover brightness/colour step is removed with a per-column,
+            heavily smoothed offset that fades out away from the seam - a
+            low-frequency correction only, the texture stays 100% single-frame.
+        """
         import numpy as np
-        from PIL import ImageChops
         W, H = job['wpx'], job['hpx']
         layers = job['layers']
         good = [i for i, l in enumerate(layers)
@@ -684,33 +1187,28 @@ def run_extraction(p, log, set_progress, cancel):
         rest = [i for i, l in enumerate(layers)
                 if l.get('aniso', 99.0) > RENDER_MAX_ANISO]
         order = good + rest              # good (clean) frames first, oblique last
-        out = None                       # float32 HxWx3 accumulator
+        out = None                       # uint8 HxWx3 accumulator
         filled = None                    # bool HxW: pixel already has data
         srcid = None                     # uint8 HxW: which layer filled each pixel
         used = 0
+        seams = []
         for pos, i in enumerate(order):
             if pos >= len(good) and filled is not None and filled.all():
                 break                    # holes closed -> stop before oblique frames
             layer = layers[i]
-            im, icc = load_image(layer['path'])
-            A, B, C, D = layer['corners']
-            quad = [A[0], A[1], D[0], D[1], C[0], C[1], B[0], B[1]]
-            rect = to_srgb_crop(im.transform((W, H), Image.QUAD, quad, Image.BICUBIC),
-                                icc)
-            vmask = np.asarray(_white_full(im.size).transform(
-                (W, H), Image.QUAD, quad, Image.NEAREST)) > 127
-            ra = np.asarray(rect, dtype=np.float32)
+            rgb, vmask = _rectify(job, layer, W, H)
             if out is None:
-                out = ra.copy()
+                out = rgb
                 filled = vmask.copy()
                 srcid = np.where(vmask, np.uint8(used), np.uint8(255))
                 used += 1
                 if filled.all():
                     break
                 continue
-            need = vmask & (~filled)                    # only still-empty pixels
+            need = vmask & (~filled)                    # still-empty pixels
             if not need.any():
                 continue
+            ra = rgb.astype(np.float32)
             # radiometric match: make this frame match the already-placed pixels
             # in the overlap. A per-channel AFFINE match (mean AND contrast/std),
             # so a seam is removed even when the two frames differ in view angle
@@ -719,36 +1217,107 @@ def run_extraction(p, log, set_progress, cancel):
             ov = vmask & filled
             if ov.sum() > 500:
                 for c in range(3):
-                    oc = out[..., c][ov]; rc = ra[..., c][ov]
+                    oc = out[..., c][ov].astype(np.float32); rc = ra[..., c][ov]
                     m_out, m_rect = float(oc.mean()), float(rc.mean())
                     s_out, s_rect = float(oc.std()), float(rc.std())
                     s_ratio = min(1.6, max(0.6, s_out / s_rect)) if s_rect > 1e-3 else 1.0
                     ra[..., c] = (ra[..., c] - m_rect) * s_ratio + m_out
                 np.clip(ra, 0, 255, out=ra)
-            out[need] = ra[need]
-            srcid[need] = np.uint8(used)
+            take = need
+            if job.get('smart_seam', True):
+                try:
+                    # green channel only: enough to score how alike two frames
+                    # look, and it avoids two full-size float temporaries
+                    seam = min_error_seam(np, out[..., 1], ra[..., 1],
+                                          filled, vmask,
+                                          slack=job.get('seam_slack', 300))
+                except Exception as e:
+                    seam = None
+                    log(f"plot {job['pid']}: seam search failed ({e}); "
+                        "falling back to plain gap fill")
+                if seam is not None:
+                    take = seam['take']
+                    seams.append(seam)
+                    try:
+                        ra = feather_seam(np, out, ra, seam)
+                    except Exception as e:
+                        log(f"plot {job['pid']}: seam feather failed ({e})")
+            out[take] = ra[take].astype(np.uint8)
+            srcid[take] = np.uint8(used)
             filled |= vmask
             used += 1
             if filled.all():
                 break
         if out is None:
-            out = np.zeros((H, W, 3), np.float32)
+            out = np.zeros((H, W, 3), np.uint8)
             filled = np.zeros((H, W), bool)
             srcid = np.full((H, W), 255, np.uint8)
         job['filled_pct'] = 100.0 * float(filled.mean())
         job['layers_used'] = used
-        # seam location: median row where the source frame changes (the boundary
-        # a plant could straddle). Recorded so a reviewer knows where to look;
-        # not auto-flagged, since these long plots ALWAYS need 2 frames along
-        # their length and the seam is a thin line (parallax tiny at emergence).
+        # seam location, recorded so a reviewer knows where to spot-check. These
+        # long plots ALWAYS need 2 frames along their length (one PhaseOne frame
+        # covers ~4.2 m of a 4.35 m plot), so a seam is normal; what matters is
+        # that it no longer cuts through plants.
         job['seam_y_pct'] = ''
         if used > 1:
-            vchg = np.zeros((H, W), bool)
-            vchg[1:, :] = (srcid[1:, :] != srcid[:-1, :]) & filled[1:, :] & filled[:-1, :]
-            rows = np.where(vchg.any(1))[0]
+            chg = np.zeros((H, W), bool)
+            chg[1:, :] = (srcid[1:, :] != srcid[:-1, :]) & filled[1:, :] & filled[:-1, :]
+            rows = np.where(chg.any(1))[0]
             if len(rows):
                 job['seam_y_pct'] = f"{100.0 * float(np.median(rows)) / H:.0f}"
-        return Image.fromarray(out.astype(np.uint8), 'RGB')
+            else:
+                chg = np.zeros((H, W), bool)
+                chg[:, 1:] = (srcid[:, 1:] != srcid[:, :-1]) & filled[:, 1:] & filled[:, :-1]
+                cols = np.where(chg.any(0))[0]
+                if len(cols):
+                    job['seam_y_pct'] = f"x{100.0 * float(np.median(cols)) / W:.0f}"
+        job['seam_smart'] = len(seams)
+        if job.get('seam_map') and used > 1:
+            # QC aid: which frame each pixel came from (0,1,2..., 255 = no data)
+            try:
+                sp = os.path.splitext(job['out'])[0] + "_seam.png"
+                sd = os.path.dirname(sp)
+                os.makedirs(sd, exist_ok=True)
+                vis = np.where(srcid == 255, np.uint8(0),
+                               (60 + srcid.astype(np.uint16) * 70) % 256).astype(np.uint8)
+                Image.fromarray(vis, 'L').save(sp)
+            except Exception as e:
+                log(f"plot {job['pid']}: seam map not written ({e})")
+        return Image.fromarray(out, 'RGB')
+
+    def _unprobe(crop, job, why):
+        """Auto-fit could not fit: trim the probe margin so what ships is the PLOT
+        rectangle, not the widened render.
+
+        Returning the widened crop - which is what this did originally - ships a crop
+        2*fit_probe_m wider than the plot, containing the NEIGHBOURING plots' rows.
+        That is worse than never enabling auto-fit. Measured on OZ Barley York: the
+        4 plots with too little emergence for rows to be detected came out 1.82 m
+        across against a 1.12 m plot, and the extra 0.70 m held a neighbour's rows
+        on each side.
+        """
+        job['fit_note'] = why
+        pm = float(job.get('fit_probe_used') or 0.0)
+        if pm <= 0:
+            return crop
+        W, H = crop.size
+        # rows run along the plot's long axis, so 'across rows' is the shorter side
+        if W <= H:
+            a_px, mpp, axis = W, float(job.get('mpp_x') or 0.0), 'x'
+        else:
+            a_px, mpp, axis = H, float(job.get('mpp_y') or 0.0), 'y'
+        across_m = a_px * mpp
+        if mpp <= 0 or across_m <= 2.5 * pm:
+            return crop                       # cannot tell probe from plot: leave it
+        cut = int(round(pm / across_m * a_px))
+        if cut <= 0 or 2 * cut >= a_px:
+            return crop
+        box = (cut, 0, W - cut, H) if axis == 'x' else (0, cut, W, H - cut)
+        out = crop.crop(box)
+        job['fit_note'] = f"{why}; probe trimmed back to the plot rectangle"
+        if job.get('geotag') and job.get('gcps'):
+            job['gcps'] = _refit_gcps_box(job['gcps'], box[0], box[1], box[2], box[3])
+        return out
 
     def _apply_auto_fit(crop, job):
         """Detect the planted rows in the (wider-than-grid) rectified crop and
@@ -758,42 +1327,72 @@ def run_extraction(p, log, set_progress, cancel):
         significant black (incomplete coverage) since the area would be wrong."""
         import numpy as np
         # black fraction: incomplete-coverage crops give garbage row detection
-        small = crop.resize((min(400, crop.width), min(1200, crop.height)))
+        sc = max(crop.width, crop.height) / 1200.0
+        small = (crop.resize((max(1, int(crop.width / sc)), max(1, int(crop.height / sc))))
+                 if sc > 1 else crop)
         arr = np.asarray(small.convert('RGB'))
         black_pct = 100.0 * float(np.mean(arr.sum(2) < 24))
         if black_pct > 10.0:
-            job['fit_note'] = f'low coverage ({black_pct:.0f}% black) - area NOT fitted'
-            return crop                      # keep full crop, don't emit a bogus area
+            return _unprobe(crop, job,
+                            f'low coverage ({black_pct:.0f}% black) - area NOT fitted')
         try:
             fb = detect_row_fit(crop, rows_target=job.get('fit_rows', 0),
-                                 mode=job.get('fit_mode', 'width'))
+                                 mode=job.get('fit_mode', 'width'),
+                                 across=job.get('fit_across'))
         except Exception as e:
             log(f"plot {job['pid']}: auto-fit detect failed ({e}); keeping full crop")
             fb = None
         if not fb:
-            job['fit_note'] = 'rows not detected'
-            return crop
-        # sanity: fitted width must be within 60% of the expected 7-row span
-        exp_w = job.get('mpp_x', 0) * (fb['box'][1] - fb['box'][0])
+            return _unprobe(crop, job, 'rows not detected')
         if job.get('fit_rows') and fb['rows'] < job['fit_rows']:
-            job['fit_note'] = f"only {fb['rows']}/{job['fit_rows']} rows found - kept full crop"
-            return crop
+            return _unprobe(crop, job,
+                            f"only {fb['rows']}/{job['fit_rows']} rows found")
         x0, x1, y0, y1 = fb['box']
         W, H = crop.size
         x0 = max(0, min(x0, W - 2)); x1 = max(x0 + 1, min(x1, W))
         y0 = max(0, min(y0, H - 2)); y1 = max(y0 + 1, min(y1, H))
         crop = crop.crop((x0, y0, x1, y1))
         if job['geotag'] and job.get('gcps'):
+            # REFIT the GCPs onto the trimmed frame; do NOT filter to the ones that
+            # happen to fall inside it. For a rectified crop the GCPs sit at the
+            # corners of the rendered rectangle (rows 0 and H), and auto-fit cuts
+            # the top and bottom away - so filtering drops ALL of them and the
+            # GeoTIFF ships with no georeferencing at all. That is exactly what
+            # happened on the 2026-08-12 autofit run: 691 of 696 crops came out
+            # with 0 GCPs and save_geotiff logged "no GCPs landed inside the crop"
+            # for every one. Instead fit v = a + b*row + c*col + d*row*col (exactly
+            # determined by 4 corner GCPs, which is what these are) for lon, lat
+            # and z, then evaluate it at the corners of the new frame.
+            g = job['gcps']
             ng = []
-            for (r, c, lon, lat, z) in job['gcps']:
-                nc, nr = c - x0, r - y0
-                if -0.5 <= nc <= (x1 - x0) + 0.5 and -0.5 <= nr <= (y1 - y0) + 0.5:
-                    ng.append((nr, nc, lon, lat, z))
+            if len(g) >= 4:
+                try:
+                    A = [[1.0, gg[0], gg[1], gg[0] * gg[1]] for gg in g]
+                    coefs = []
+                    for k in (2, 3, 4):                      # lon, lat, z
+                        b = [gg[k] for gg in g]
+                        coefs.append(_lstsq4(A, b))
+                    for r_src, r_dst in ((y0, 0.0), (y1, float(y1 - y0))):
+                        for c_src, c_dst in ((x0, 0.0), (x1, float(x1 - x0))):
+                            vals = [cf[0] + cf[1] * r_src + cf[2] * c_src
+                                    + cf[3] * r_src * c_src for cf in coefs]
+                            ng.append((r_dst, c_dst, vals[0], vals[1], vals[2]))
+                except Exception as e:
+                    log(f"plot {job['pid']}: GCP refit failed ({e}); shifting instead")
+                    ng = []
+            if not ng:                                       # <4 GCPs, or refit failed
+                ng = [(r - y0, c - x0, lon, lat, z) for (r, c, lon, lat, z) in g]
             job['gcps'] = ng
         mppx, mppy = job.get('mpp_x', 0.0), job.get('mpp_y', 0.0)
         job['fit_rows_found'] = fb['rows']
-        job['fit_w_m'] = (x1 - x0) * mppx if mppx else 0.0
-        job['fit_l_m'] = (y1 - y0) * mppy if mppy else 0.0
+        # width = ACROSS the rows, length = ALONG them, whichever image axis
+        # each happens to be in this trial's shapefile vertex order
+        if fb.get('across', 'x') == 'y':
+            job['fit_w_m'] = (y1 - y0) * mppy if mppy else 0.0
+            job['fit_l_m'] = (x1 - x0) * mppx if mppx else 0.0
+        else:
+            job['fit_w_m'] = (x1 - x0) * mppx if mppx else 0.0
+            job['fit_l_m'] = (y1 - y0) * mppy if mppy else 0.0
         job['fit_area_m2'] = job['fit_w_m'] * job['fit_l_m']
         job['cw'], job['ch'] = crop.size
         return crop
@@ -804,6 +1403,16 @@ def run_extraction(p, log, set_progress, cancel):
         try:
             if job.get('layers'):
                 crop = _render_fill(job)
+            elif job['eff'] == 'rectify' and job.get('self_layer'):
+                # single-frame rectify: same exact projected-mesh warp as the
+                # gap-fill path, so the plot's internal geometry is right (rows
+                # stay straight) instead of bent by a 4-corner bilinear fit
+                import numpy as np
+                rgb, vmask = _rectify(job, job['self_layer'], job['wpx'], job['hpx'])
+                job['filled_pct'] = 100.0 * float(vmask.mean())
+                job['layers_used'] = 1
+                job['seam_y_pct'] = ''
+                crop = Image.fromarray(rgb, 'RGB')
             else:
                 im, icc = load_image(job['path'])
                 crop = im.crop((job['x0'], job['y0'], job['x1'], job['y1']))
@@ -862,11 +1471,15 @@ def run_extraction(p, log, set_progress, cancel):
             job['row']['raw_covered_m2'] = f"{area * fp / 100:.3f}"
             job['cov'] = fp
             job['full'] = fp >= 99.5
-            job['flag'] = "" if fp >= 99.5 else \
-                f"  [!] {fp:.0f}% covered even after fill"
+            job['flag'] = "" if fp >= 99.5 else (
+                f"  [!] {fp:.1f}% of the plot in this frame (rest is black)"
+                if job.get('layers_used', 1) == 1 else
+                f"  [!] {fp:.0f}% covered even after fill")
             nfr = job.get('layers_used', 1)
-            job['cam_label'] = (f"{nfr} frame{'s' if nfr != 1 else ''}"
-                                + (" (gap-filled, matched)" if nfr > 1 else " (single)"))
+            job['cam_label'] = (
+                f"{nfr} frames (stitched"
+                + (", min-error seam" if job.get('seam_smart') else ", gap-fill")
+                + ")" if nfr > 1 else f"{job['cam_label']} (single frame)")
         seam_msg = ''
         if not err and job['is_rank1']:
             nfr = job.get('layers_used', 1)
@@ -918,6 +1531,7 @@ def run_extraction(p, log, set_progress, cancel):
         row = dict(plot_id=pid, plot_area_m2='', margin_m=f"{margin:.2f}",
                    raw_image='', raw_file='', crop_w='', crop_h='',
                    corners_in_frame='', raw_covered_pct='', raw_covered_m2='',
+                   cand_frames='', best_frame='', best_cover_pct='', best_cover_m2='',
                    frames_used='', seam_y_pct='',
                    fit_rows='', fit_width_m='', fit_length_m='', fit_area_m2='',
                    ortho_file='', ortho_covered_pct='', ortho_covered_m2='',
@@ -941,13 +1555,27 @@ def run_extraction(p, log, set_progress, cancel):
                     dx = (bpt[0] - a[0]) * _mx; dy = (bpt[1] - a[1]) * _my
                     d = math.hypot(dx, dy) or 1.0
                     return (dx / d / _mx, dy / d / _my)
+
+                def _len_m(a, bpt):
+                    return math.hypot((bpt[0] - a[0]) * _mx, (bpt[1] - a[1]) * _my)
                 A, B, C, D = ring0
-                uAB = _uv_wid(A, B); uDC = _uv_wid(D, C)      # width-edge directions
                 pm = fit_probe_m
-                ring0 = [[A[0] - uAB[0] * pm, A[1] - uAB[1] * pm],
-                         [B[0] + uAB[0] * pm, B[1] + uAB[1] * pm],
-                         [C[0] + uDC[0] * pm, C[1] + uDC[1] * pm],
-                         [D[0] - uDC[0] * pm, D[1] - uDC[1] * pm]]
+                # Push out the SHORT (across-row) edges only: rows run along the
+                # plot's long axis, so it's the short axis that has to grow to
+                # recover rows the grid clipped. Which vertex pair is short
+                # depends on the shapefile's vertex order -> measure it.
+                if (_len_m(A, B) + _len_m(C, D)) <= (_len_m(B, C) + _len_m(D, A)):
+                    u1 = _uv_wid(A, B); u2 = _uv_wid(D, C)    # A-B / D-C are short
+                    ring0 = [[A[0] - u1[0] * pm, A[1] - u1[1] * pm],
+                             [B[0] + u1[0] * pm, B[1] + u1[1] * pm],
+                             [C[0] + u2[0] * pm, C[1] + u2[1] * pm],
+                             [D[0] - u2[0] * pm, D[1] - u2[1] * pm]]
+                else:
+                    u1 = _uv_wid(A, D); u2 = _uv_wid(B, C)    # A-D / B-C are short
+                    ring0 = [[A[0] - u1[0] * pm, A[1] - u1[1] * pm],
+                             [B[0] - u2[0] * pm, B[1] - u2[1] * pm],
+                             [C[0] + u2[0] * pm, C[1] + u2[1] * pm],
+                             [D[0] + u1[0] * pm, D[1] + u1[1] * pm]]
                 fit_probe_used = pm
             ring_w = expand_wgs(ring0, margin)
             lon0 = sum(q[0] for q in ring_w) / len(ring_w)
@@ -974,7 +1602,7 @@ def run_extraction(p, log, set_progress, cancel):
                 # near-NADIR view (low foreshortening) — an oblique frame stretches
                 # the far edge into streaks. Gap-fill then covers what one frame
                 # misses. For native/mask (no warp) corner-count still leads.
-                prefer_nadir = raw_mode in ('rectify', 'auto')
+                prefer_nadir = raw_mode in ('rectify', 'auto', 'best')
                 mpx_g = 111320.0 * math.cos(math.radians(lat0))
                 mpy_g = 110540.0
 
@@ -989,11 +1617,19 @@ def run_extraction(p, log, set_progress, cancel):
                     egA = egB = egC = egD = None; gW = gL = None
                 cand = []
                 for cam in cams:
-                    uvs = [cam.project(q) for q in pts3d]
                     uvs_p = [cam.project(q) for q in pts3d_plot]
-                    if any(uv is None for uv in uvs) or any(uv is None for uv in uvs_p):
+                    if any(uv is None for uv in uvs_p):
                         continue
                     w, h = cam.sensor.width, cam.sensor.height
+                    # cheap reject: cam.project happily extrapolates outside the
+                    # sensor, so without this every camera in the flight (3000+)
+                    # counted as a "candidate" and got 8 projections spent on it
+                    if (max(uv.x for uv in uvs_p) < 0 or min(uv.x for uv in uvs_p) > w or
+                            max(uv.y for uv in uvs_p) < 0 or min(uv.y for uv in uvs_p) > h):
+                        continue
+                    uvs = [cam.project(q) for q in pts3d]
+                    if any(uv is None for uv in uvs):
+                        continue
                     inside = sum(0 <= uv.x < w and 0 <= uv.y < h for uv in uvs_p)
                     over = max(max(-uv.x, uv.x - w, -uv.y, uv.y - h, 0) for uv in uvs_p)
                     crop_clear = all(INSET <= uv.x <= w - INSET and
@@ -1016,24 +1652,82 @@ def run_extraction(p, log, set_progress, cancel):
                         if sc:
                             aniso = max(sc) / max(min(sc), 1e-9)
                             gsd = sorted(sc)[len(sc) // 2]
-                    if prefer_nadir:
+                    # EXACT share of the plot this one frame holds: the projected
+                    # plot quad clipped to the frame rectangle. "Corners in frame"
+                    # is 2/4 for a frame holding 51% and for one holding 95% of
+                    # the plot, so it cannot pick the best single image; this can.
+                    covq = frame_coverage([(uv.x, uv.y) for uv in uvs_p], w, h)
+                    if covq <= 0.0:
+                        continue                    # frame does not see the plot
+                    if raw_mode == 'best':
+                        # one image per plot, no stitching: take the frame that
+                        # holds the LARGEST part of the plot, then the most nadir
+                        # / most centred of those.
+                        key = (-round(covq, 4), round(aniso, 3),
+                               round(centre_dist, 3))
+                    elif prefer_nadir:
                         # bucket foreshortening coarsely so that among comparably
                         # near-nadir frames, the one that COVERS more plot wins.
                         # This avoids picking a barely-clipping nadir frame (which
                         # leaves black) over a slightly-more-oblique full-coverage one.
-                        key = (round(aniso / 0.35) * 0.35, -inside,
+                        key = (round(aniso / 0.35) * 0.35, -round(covq, 3),
                                round(centre_dist, 3), over)
                     else:
-                        key = (-inside, -int(crop_clear), round(centre_dist, 4), over)
-                    cand.append((key, cam, uvs, uvs_p, w, h, inside, aniso, gsd))
+                        # native / mask / bbox: no warp, so what matters is how
+                        # much of the plot this frame holds (was corner count,
+                        # which is 2/4 for an 81% frame and for a 99% one alike),
+                        # then whether the crop box is clear of the image edge
+                        # (no black border), then how centred the plot is.
+                        key = (-round(covq, 4), -int(crop_clear),
+                               round(centre_dist, 4), over)
+                    cand.append((key, cam, uvs, uvs_p, w, h, inside, aniso, gsd, covq))
                 cand.sort(key=lambda c: c[0])
+                row['cand_frames'] = str(len(cand))
+                if cand:
+                    bestc = max(cand, key=lambda c: c[9])
+                    row['best_frame'] = bestc[1].label
+                    row['best_cover_pct'] = f"{100 * bestc[9]:.1f}"
+                    row['best_cover_m2'] = f"{plot_area * bestc[9]:.3f}"
+                    if candidates_csv is not None:
+                        chosen = cand[0][1].label
+                        with _cand_lock:
+                            for crank, c in enumerate(cand[:CAND_REPORT_N], 1):
+                                candidates_csv.append(dict(
+                                    plot_id=pid, rank=crank, camera=c[1].label,
+                                    cover_pct=f"{100 * c[9]:.1f}",
+                                    cover_m2=f"{plot_area * c[9]:.3f}",
+                                    corners_in_frame=f"{c[6]}/4",
+                                    aniso=f"{c[7]:.3f}",
+                                    mm_per_px=(f"{1000.0 / c[8]:.3f}" if c[8] else ''),
+                                    used=('yes' if c[1].label == chosen else '')))
                 if not cand:
                     row['note'] = 'no covering raw image'
                     log(f"plot {pid}: NO covering raw image")
                 else:
                     # PHASE A (this main thread): resolve all Metashape geometry and
                     # queue a render job. The heavy pixel work runs later in parallel.
-                    for rank, (_s, cam, uvs, uvs_p, w, h, inside, aniso, gsd) in \
+                    mesh_cache = {}       # (nx,ny) -> 3D ground nodes for this plot
+
+                    def _mesh_nodes3d(nx, ny):
+                        """Ground points of the rectification mesh, shared by every
+                        frame of this plot - that shared grid is what makes the
+                        frames land on each other."""
+                        key = (nx, ny)
+                        got = mesh_cache.get(key)
+                        if got is None:
+                            got = [to3d(lon, lat)[0]
+                                   for lon, lat in mesh_uv_nodes(ring0, nx, ny)]
+                            mesh_cache[key] = got
+                        return got
+
+                    def _project_nodes(cam_, nodes3d):
+                        out_ = []
+                        for q in nodes3d:
+                            uv = cam_.project(q)
+                            out_.append(None if uv is None else (uv.x, uv.y))
+                        return out_
+
+                    for rank, (_s, cam, uvs, uvs_p, w, h, inside, aniso, gsd, covq) in \
                             enumerate(cand[:n_per_plot], 1):
                         xs = [uv.x for uv in uvs]
                         ys = [uv.y for uv in uvs]
@@ -1071,6 +1765,8 @@ def run_extraction(p, log, set_progress, cancel):
                         eff = raw_mode
                         if eff == 'auto':                       # straighten tilted plots only
                             eff = 'rectify' if _tilt_from_vertical(plot_uv) > 3.0 else 'mask'
+                        elif eff == 'best':                     # one frame, upright, no stitch
+                            eff = 'rectify'
                         rectified = (eff == 'rectify' and len(plot_uv) == 4)
                         # output crop size, computed analytically (no pixels needed yet)
                         if rectified:
@@ -1121,27 +1817,76 @@ def run_extraction(p, log, set_progress, cancel):
                                     px, py = uv.x - x0, uv.y - y0
                                     if -0.5 <= px <= (x1-x0)+0.5 and -0.5 <= py <= (y1-y0)+0.5:
                                         gcps.append((py, px, lon, lat, zg))
+                        # Rectification mesh: the plot's ground grid projected into
+                        # this frame with the FULL camera model. Every frame of the
+                        # plot uses the same ground nodes, so the frames overlay
+                        # each other exactly (see _rectify).
+                        nx = ny = 0
+                        self_layer = None
+                        if rectified:
+                            nx, ny = mesh_dims(cw2, ch2, mesh_step)
+                            n3d = _mesh_nodes3d(nx, ny)
+                            self_layer = dict(path=path, aniso=aniso, nx=nx, ny=ny,
+                                              nodes=_project_nodes(cam, n3d),
+                                              corners=[(uv.x, uv.y) for uv in uvs_p])
                         # Gap-fill: for a rectified rank-1 crop, gather the top
                         # near-nadir candidate frames (cand is already sorted
                         # nadir-first) so a neighbour can fill what the best single
                         # frame misses. Each layer carries its foreshortening so the
                         # renderer can skip oblique frames that would smear.
+                        # In "best single frame" mode there is deliberately no
+                        # gap-fill: one untouched frame per plot, zero stitching.
                         layers = None
-                        if rank == 1 and rectified:
-                            layers = []
-                            for (_s2, cam2, _u2, uvs_p2, _w2, _h2, _in2, an2, _g2) in cand[:8]:
+                        if rank == 1 and rectified and raw_mode != 'best':
+                            # Choose the FEWEST frames that still cover the whole
+                            # plot (greedy set cover on a coarse ground grid).
+                            # Every extra frame is another seam, so taking the
+                            # highest-coverage frames in rank order - which is
+                            # what the old code did - could pull in 4-5 frames
+                            # where 2 suffice. Fewer frames = fewer boundaries.
+                            c3d = _mesh_nodes3d(12, 4)
+                            pool = cand[:max(2 * GAPFILL_N, 12)]
+                            masks = []
+                            for c in pool:
+                                w2, h2 = c[4], c[5]
+                                masks.append([
+                                    (q is not None and 0 <= q[0] < w2 and 0 <= q[1] < h2)
+                                    for q in _project_nodes(c[1], c3d)])
+                            covered = list(masks[0])
+                            picked = [0]
+                            while (not all(covered)) and len(picked) < GAPFILL_N:
+                                bi, bgain = None, 0
+                                for i2, m in enumerate(masks):
+                                    if i2 in picked:
+                                        continue
+                                    gain = sum(1 for k, cv in enumerate(covered)
+                                               if m[k] and not cv)
+                                    if gain > bgain:
+                                        bi, bgain = i2, gain
+                                if bi is None:
+                                    break
+                                picked.append(bi)
+                                covered = [a or b for a, b in zip(covered, masks[bi])]
+                            layers = [self_layer]
+                            for i2 in picked[1:]:
+                                cam2 = pool[i2][1]
                                 p2 = resolve_photo(cam2)
                                 if p2 is None:
                                     continue
                                 layers.append(dict(
-                                    path=p2, aniso=an2,
-                                    corners=[(uv.x, uv.y) for uv in uvs_p2]))
+                                    path=p2, aniso=pool[i2][7], nx=nx, ny=ny,
+                                    nodes=_project_nodes(cam2, n3d),
+                                    corners=[(uv.x, uv.y) for uv in pool[i2][3]]))
                             if len(layers) <= 1:
-                                layers = None          # nothing to fill from
+                                layers = None          # one frame covers it all
                         # ground metres-per-pixel of the rectified output (for
                         # auto-fit area + width in real units)
                         mpp_x = (gW / wpx) if (rectified and gW and wpx) else 0.0
                         mpp_y = (gL / hpx) if (rectified and gL and hpx) else 0.0
+                        # image axis running ACROSS the rows = the plot's SHORT
+                        # ground axis (x is the gW edge, y is the gL edge)
+                        fit_across = ('x' if (not gW or not gL or gW <= gL)
+                                      else 'y')
                         job = dict(pid=pid, path=path, x0=x0, y0=y0, x1=x1, y1=y1,
                                    eff=eff, plot_uv=plot_uv, wpx=wpx, hpx=hpx,
                                    out=out, geotag=geotag, gcps=gcps, layers=layers,
@@ -1149,29 +1894,24 @@ def run_extraction(p, log, set_progress, cancel):
                                    cw=cw2, ch=ch2, full=False, cov=0.0, flag='',
                                    auto_fit=(auto_fit and rectified and rank == 1),
                                    fit_rows=fit_rows, fit_mode=fit_mode,
-                                   mpp_x=mpp_x, mpp_y=mpp_y)
+                                   mpp_x=mpp_x, mpp_y=mpp_y,
+                                   fit_across=fit_across, self_layer=self_layer,
+                                   smart_seam=smart_seam, seam_map=seam_map,
+                                   seam_slack=seam_slack)
                         if rank == 1:
-                            # coverage: fraction of the plot polygon imaged in this frame
-                            xs_r = [q[0] for q in ring0]; ys_r = [q[1] for q in ring0]
-                            gx0, gx1 = min(xs_r), max(xs_r)
-                            gy0, gy1 = min(ys_r), max(ys_r)
-                            NN = 15; tot = infr = 0
-                            for gi in range(NN):
-                                for gj in range(NN):
-                                    lon = gx0 + (gx1 - gx0) * gi / (NN - 1)
-                                    lat = gy0 + (gy1 - gy0) * gj / (NN - 1)
-                                    if not _point_in_ring(lon, lat, ring0):
-                                        continue
-                                    tot += 1
-                                    p3c, _z = to3d(lon, lat)
-                                    uvc = cam.project(p3c)
-                                    if uvc is not None and 0 <= uvc.x < w and 0 <= uvc.y < h:
-                                        infr += 1
-                            cov = (100.0 * infr / tot) if tot else 0.0
-                            job['full'] = (inside == len(uvs))
+                            # coverage of the plot by THIS single frame, from the
+                            # exact clipped-quad area (replaces the old 15x15 point
+                            # sampling: same answer, ~200x cheaper, no quantisation)
+                            cov = 100.0 * covq
+                            # Judge completeness by real coverage, not by how many
+                            # of the 4 corners are in frame: this frame holds 99%
+                            # of the plot with only 1 corner inside, which the old
+                            # "1/4 corners" warning made look like a failure.
+                            job['full'] = cov >= 99.5
                             job['cov'] = cov
-                            job['flag'] = "" if inside == len(uvs) else \
-                                f"  [!] only {inside}/{len(uvs)} corners in-frame"
+                            job['flag'] = "" if cov >= 99.5 else \
+                                f"  [!] {cov:.1f}% of the plot in this frame " \
+                                f"({inside}/{len(uvs)} corners)"
                             row.update(raw_image=cam.label, raw_file=fn,
                                        crop_w=cw2, crop_h=ch2,
                                        corners_in_frame=f"{inside}/{len(uvs)}",
@@ -1250,6 +1990,21 @@ def run_extraction(p, log, set_progress, cancel):
             except Exception as e:
                 log(f"plot {pid}: ortho fallback FAILED ({e})")
 
+    # per-plot candidate report: every raw frame that sees the plot, how much of
+    # the plot it holds, and which one was used. This is the "all the images for
+    # this plot / which is the best one" record.
+    if candidates_csv:
+        os.makedirs(p['outdir'], exist_ok=True)
+        cpath = os.path.join(p['outdir'], "candidates.csv")
+        try:
+            with open(cpath, 'w', newline='', encoding='utf-8') as f:
+                wc = csv.DictWriter(f, fieldnames=list(candidates_csv[0].keys()))
+                wc.writeheader()
+                wc.writerows(candidates_csv)
+            log(f"Candidate frames per plot: {cpath} ({len(candidates_csv)} rows)")
+        except OSError as e:
+            log(f"[!] Could not write candidates.csv: {e}")
+
     # manifest
     os.makedirs(p['outdir'], exist_ok=True)
     mpath = os.path.join(p['outdir'], "manifest.csv")
@@ -1266,9 +2021,113 @@ def run_extraction(p, log, set_progress, cancel):
     return p['outdir']
 
 
+_GCP_TR = {}
+
+
+_GCP_EPSG = [None]          # set per run from the 'gcp_epsg' parameter
+
+
+def _gcp_target():
+    """Target CRS for the GCPs written into GeoTIFF crops.
+
+    Geometry is normalised to EPSG:4326 internally (see the wgs84 CoordinateSystem
+    and the plot-ring transform on load), so GCPs are lon/lat by default. Set
+    PE_GCP_EPSG to write them in another CRS instead - the coordinates are
+    TRANSFORMED, not merely relabelled. Use this to keep a whole project in one
+    system, e.g. PE_GCP_EPSG=7850 for GDA2020 / MGA zone 50.
+
+    Note the default 4326 label is inherited from the Metashape chunk CRS. For an
+    Australian project those degrees are really GDA2020 values, whose correct code
+    is 7844 - numerically identical, but the label is loose. Setting this variable
+    removes the ambiguity.
+    """
+    v = _GCP_EPSG[0] or os.environ.get('PE_GCP_EPSG')
+    if not v:
+        return 4326, None
+    try:
+        tgt = int(v)
+    except (TypeError, ValueError):
+        return 4326, None
+    if tgt == 4326:
+        return 4326, None
+    if tgt not in _GCP_TR:
+        from pyproj import Transformer
+        _GCP_TR[tgt] = Transformer.from_crs("EPSG:4326", f"EPSG:{tgt}",
+                                            always_xy=True)
+    return tgt, _GCP_TR[tgt]
+
+
+def retag_gcps(folder, epsg, log=print, progress=None):
+    """Re-express the ground control points of every GeoTIFF in `folder`.
+
+    Coordinates are TRANSFORMED into the target CRS, not relabelled, and the
+    pixels are untouched - only the GCP block is rewritten, about 4 KB per file.
+
+    This exists because the output CRS is decided at extraction time: a set
+    produced before it was set ships in the internal EPSG:4326, and a delivery
+    can end up half in one system and half in another. That happened once here,
+    and this is the repair.
+
+    Returns (converted, already_correct, skipped, failed).
+    """
+    import glob
+    import rasterio
+    from rasterio.control import GroundControlPoint
+    from rasterio.crs import CRS
+    from pyproj import Transformer
+
+    target = int(epsg)
+    files = sorted(glob.glob(os.path.join(folder, "*.tif"))
+                   + glob.glob(os.path.join(folder, "*.tiff")))
+    if not files:
+        log(f"[!] no GeoTIFFs found in {folder}")
+        return 0, 0, 0, 0
+    log(f"Re-expressing GCPs of {len(files)} file(s) in EPSG:{target} - "
+        f"pixels are not touched.")
+    trs, done, same, skip, bad = {}, 0, 0, 0, 0
+    for i, f in enumerate(files):
+        try:
+            with rasterio.open(f) as s:
+                g, c = s.gcps
+                src_epsg = c.to_epsg() if c else None
+            if not g:
+                skip += 1
+                continue
+            if src_epsg == target:
+                same += 1
+                continue
+            if src_epsg is None:
+                log(f"[!] {os.path.basename(f)}: GCPs carry no CRS - skipped")
+                skip += 1
+                continue
+            if src_epsg not in trs:
+                trs[src_epsg] = Transformer.from_crs(f"EPSG:{src_epsg}",
+                                                     f"EPSG:{target}",
+                                                     always_xy=True)
+            tf = trs[src_epsg]
+            ng = []
+            for q in g:
+                x, y = tf.transform(q.x, q.y)
+                ng.append(GroundControlPoint(row=q.row, col=q.col,
+                                             x=x, y=y, z=q.z))
+            with rasterio.open(f, "r+") as d:
+                d.gcps = (ng, CRS.from_epsg(target))
+            done += 1
+        except Exception as e:
+            log(f"[!] {os.path.basename(f)}: {e}")
+            bad += 1
+        if progress and (i + 1) % 25 == 0:
+            progress(i + 1, len(files))
+    log(f"GCP CRS: {done} converted, {same} already EPSG:{target}, "
+        f"{skip} skipped, {bad} failed.")
+    return done, same, skip, bad
+
+
 def save_geotiff(path, pil_img, gcps, tags, log):
-    """Write an RGB crop as a lossless GeoTIFF with WGS84 GCPs and source EXIF
-    copied into the GDAL metadata (readable via gdalinfo / rasterio.tags())."""
+    """Write an RGB crop as a lossless GeoTIFF with GCPs and the source EXIF
+    copied into the GDAL metadata (readable via gdalinfo / rasterio.tags()).
+
+    GCPs are written in EPSG:4326 unless PE_GCP_EPSG asks for another CRS."""
     import numpy as np
     import rasterio
     from rasterio.control import GroundControlPoint
@@ -1280,8 +2139,16 @@ def save_geotiff(path, pil_img, gcps, tags, log):
     with rasterio.open(path, 'w', **prof) as dst:
         dst.write(arr.transpose(2, 0, 1))
         if gcps:
-            dst.gcps = ([GroundControlPoint(row=r, col=c, x=x, y=y, z=z)
-                         for r, c, x, y, z in gcps], CRS.from_epsg(4326))
+            epsg, tf = _gcp_target()
+            if tf is not None:
+                pts = []
+                for r, c, x, y, z in gcps:
+                    X, Y = tf.transform(x, y)
+                    pts.append(GroundControlPoint(row=r, col=c, x=X, y=Y, z=z))
+            else:
+                pts = [GroundControlPoint(row=r, col=c, x=x, y=y, z=z)
+                       for r, c, x, y, z in gcps]
+            dst.gcps = (pts, CRS.from_epsg(epsg))
         else:
             log(f"[!] {os.path.basename(path)}: no GCPs landed inside the crop")
         if tags:
@@ -1540,6 +2407,14 @@ def run_extraction_ortho_tif(p, log, set_progress, cancel):
     margin = float(p.get('margin') or 0.0)
     fmt = (p.get('format') or 'TIFF').upper()
     geotag = fmt.startswith('GEO')
+    # CRS for the GeoTIFF ground control points. Coordinates are transformed into
+    # it, not relabelled; blank keeps the internal EPSG:4326.
+    try:
+        _GCP_EPSG[0] = int(str(p.get('gcp_epsg') or '').strip() or 0) or None
+    except (TypeError, ValueError):
+        _GCP_EPSG[0] = None
+    if geotag and _GCP_EPSG[0]:
+        log(f"GCP CRS: writing ground control points in EPSG:{_GCP_EPSG[0]}")
     if geotag or fmt.startswith('TIF'):
         ext, save_kw = '.tif', dict(compression='tiff_lzw')
     elif fmt.startswith('PNG'):
@@ -1803,11 +2678,38 @@ def open_plot_editor(parent, plots_path, on_saved, log=lambda *_: None):
             L, B, R, Tp = bm['bounds']
             sxL, syT = w2s(L, Tp)
             sxR, syB = w2s(R, B)
-            bw, bh = max(1, int(round(sxR - sxL))), max(1, int(round(syB - syT)))
-            if bm['key'] != (bw, bh):
-                bm['photo'] = ImageTk.PhotoImage(bm['img'].resize((bw, bh), _I.BILINEAR))
-                bm['key'] = (bw, bh)
-            cv.create_image(sxL, syT, anchor='nw', image=bm['photo'])
+            fw, fh = sxR - sxL, syB - syT          # whole basemap, at this zoom
+            iw, ih = bm['img'].size
+            cw = cv.winfo_width() or 1100
+            chv = cv.winfo_height() or 660
+            # Render ONLY the part of the basemap inside the canvas, at canvas
+            # resolution. Scaling the whole raster to the zoom level blows up
+            # (a 10x zoom on a 5000px basemap = 50000px wide -> MemoryError).
+            vx0, vy0 = max(sxL, 0.0), max(syT, 0.0)
+            vx1, vy1 = min(sxR, float(cw)), min(syB, float(chv))
+            if fw >= 1 and fh >= 1 and vx1 - vx0 >= 1 and vy1 - vy0 >= 1:
+                box = (max(0, int(math.floor((vx0 - sxL) / fw * iw))),
+                       max(0, int(math.floor((vy0 - syT) / fh * ih))),
+                       min(iw, int(math.ceil((vx1 - sxL) / fw * iw))),
+                       min(ih, int(math.ceil((vy1 - syT) / fh * ih))))
+                if box[2] > box[0] and box[3] > box[1]:
+                    # destination rect from the SNAPPED source box, so the
+                    # basemap stays exactly registered to the plot outlines
+                    dx0, dy0 = sxL + box[0] / iw * fw, syT + box[1] / ih * fh
+                    dx1, dy1 = sxL + box[2] / iw * fw, syT + box[3] / ih * fh
+                    dw = max(1, min(int(round(dx1 - dx0)), 4 * cw))
+                    dh = max(1, min(int(round(dy1 - dy0)), 4 * chv))
+                    if bm['key'] != (box, dw, dh):
+                        try:
+                            bm['photo'] = ImageTk.PhotoImage(
+                                bm['img'].crop(box).resize((dw, dh), _I.BILINEAR))
+                            bm['key'] = (box, dw, dh)
+                        except (MemoryError, OSError, ValueError):
+                            bm['photo'] = None
+                            bm['key'] = None
+                    if bm['photo'] is not None:
+                        cv.create_image(int(round(dx0)), int(round(dy0)),
+                                        anchor='nw', image=bm['photo'])
         for i, r in enumerate(rings):
             pts = []
             for x, y in r:
@@ -2131,27 +3033,99 @@ def open_plot_editor(parent, plots_path, on_saved, log=lambda *_: None):
 
     def load_basemap():
         pth = filedialog.askopenfilename(
-            title="Ortho basemap (georeferenced GeoTIFF, same CRS as plots)",
+            title="Ortho basemap (georeferenced GeoTIFF; any CRS - reprojected to the plots)",
             filetypes=[("GeoTIFF", "*.tif *.tiff")])
         if not pth:
             return
         try:
             import numpy as np
             import rasterio
+            from rasterio.crs import CRS
             from rasterio.enums import Resampling
+            from rasterio.vrt import WarpedVRT
+            from rasterio.windows import from_bounds
             from PIL import Image as _I
+
+            # --- plot CRS (the editor works in the shapefile's coordinates) ---
+            plot_crs = None
+            if _crs:
+                for fn in (CRS.from_wkt, CRS.from_user_input):
+                    try:
+                        plot_crs = fn(_crs)
+                        break
+                    except Exception:
+                        pass
+            if plot_crs is None and geographic:
+                plot_crs = CRS.from_epsg(4326)
+
+            px0, px1 = min(allx), max(allx)
+            py0, py1 = min(ally), max(ally)
+            mx, my = 0.15 * max(px1 - px0, 1e-9), 0.15 * max(py1 - py0, 1e-9)
+
             with rasterio.open(pth) as ds:
-                dec = max(1, int(max(ds.width, ds.height) / 2500))
-                ow, oh = max(1, ds.width // dec), max(1, ds.height // dec)
-                bands = [1, 2, 3] if ds.count >= 3 else [1, 1, 1]
-                arr = ds.read(bands, out_shape=(3, oh, ow), resampling=Resampling.average)
-                b = ds.bounds
+                src_crs = ds.crs
+                log(f"Basemap CRS: {src_crs.to_string() if src_crs else 'NONE'}; "
+                    f"plots CRS: {plot_crs.to_string() if plot_crs else 'unknown'}")
+                if plot_crs is not None and src_crs is not None and src_crs != plot_crs:
+                    vrt = WarpedVRT(ds, crs=plot_crs, resampling=Resampling.bilinear)
+                    log("Basemap reprojected to the plot CRS")
+                else:
+                    vrt = ds
+                    if plot_crs is None or src_crs is None:
+                        log("WARNING: could not compare CRSs - basemap used as-is")
+                try:
+                    b = vrt.bounds
+                    # intersect raster with the plot extent (+15 % margin)
+                    L = max(b.left, px0 - mx);   R = min(b.right, px1 + mx)
+                    B = max(b.bottom, py0 - my); Tp = min(b.top, py1 + my)
+                    if R <= L or Tp <= B:
+                        raise RuntimeError(
+                            "The basemap does not overlap the plots.\n"
+                            f"Basemap extent: x {b.left:.2f}..{b.right:.2f}, "
+                            f"y {b.bottom:.2f}..{b.top:.2f}\n"
+                            f"Plot extent:    x {px0:.2f}..{px1:.2f}, "
+                            f"y {py0:.2f}..{py1:.2f}\n"
+                            "Check that the shapefile .prj and the GeoTIFF CRS are correct.")
+                    win_ = from_bounds(L, B, R, Tp, vrt.transform)
+                    ww, wh = win_.width, win_.height
+                    dec = max(1.0, max(ww, wh) / 3000.0)
+                    ow, oh = max(1, int(ww / dec)), max(1, int(wh / dec))
+                    nb = vrt.count
+                    bands = [1, 2, 3] if nb >= 3 else [1, 1, 1]
+                    arr = vrt.read(bands, window=win_, out_shape=(3, oh, ow),
+                                   resampling=Resampling.average).astype('float32')
+                    alpha = None
+                    if nb == 4 or nb == 2:
+                        alpha = vrt.read(nb, window=win_, out_shape=(oh, ow),
+                                         resampling=Resampling.nearest)
+                    nod = vrt.nodata
+                finally:
+                    if vrt is not ds:
+                        vrt.close()
+
+            valid = np.ones(arr.shape[1:], bool)
+            if nod is not None and not (isinstance(nod, float) and math.isnan(nod)):
+                valid &= ~np.all(arr == nod, axis=0)
+            elif nod is not None:
+                valid &= ~np.any(np.isnan(arr), axis=0)
+            if alpha is not None:
+                valid &= alpha > 0
+            arr = np.nan_to_num(arr)
+            # scale to 8-bit: 8-bit data passes through, anything else gets a
+            # 2-98 percentile stretch (16-bit orthos otherwise come out black)
+            if arr[:, valid].size and (arr.max() > 255 or arr.max() <= 1.0):
+                lo, hi = np.percentile(arr[:, valid], [2, 98])
+                arr = (arr - lo) / max(hi - lo, 1e-9) * 255.0
+            arr = np.clip(arr, 0, 255)
+            arr[:, ~valid] = 24                       # nodata -> canvas grey
             bm['img'] = _I.fromarray(np.transpose(arr, (1, 2, 0)).astype('uint8'), 'RGB')
-            bm['bounds'] = (b.left, b.bottom, b.right, b.top)
+            bm['bounds'] = (L, B, R, Tp)
             bm['key'] = None
-            log(f"Basemap loaded: {os.path.basename(pth)}")
+            log(f"Basemap loaded: {os.path.basename(pth)} ({ow}x{oh} px, "
+                f"{100.0 * valid.mean():.0f}% valid data in the plot window)")
             redraw()
         except Exception as e:
+            log("Basemap error: " + traceback.format_exc(limit=3))
             messagebox.showerror("Basemap", f"Could not load basemap:\n{e}")
 
     def save():
@@ -2315,7 +3289,18 @@ def main():
     except Exception:
         pass    # logos are cosmetic — never block the app
 
-    frm = ttk.Frame(root, padding=10)
+    # Tabs: the extractor form, and the plot-grid designer that builds the
+    # shapefile the extractor consumes (ortho basemap, no Metashape needed).
+    nb = ttk.Notebook(root)
+    nb.pack(fill='both', expand=True)
+    tab_extract = ttk.Frame(nb)
+    tab_grid = ttk.Frame(nb)
+    tab_tiles = ttk.Frame(nb)
+    nb.add(tab_extract, text="  Extract plots  ")
+    nb.add(tab_grid, text="  Generate plot grid  ")
+    nb.add(tab_tiles, text="  Training tiles  ")
+
+    frm = ttk.Frame(tab_extract, padding=10)
     frm.pack(fill='both', expand=True)
     frm.columnconfigure(1, weight=1)
 
@@ -2338,12 +3323,16 @@ def main():
         'dem_tif': tk.StringVar(value=cfg.get('dem_tif', '')),
         'do_ortho': tk.BooleanVar(value=cfg.get('do_ortho', False)),
         'crs_override': tk.StringVar(value=cfg.get('crs_override', 'auto')),
+        'gcp_epsg': tk.StringVar(value=str(cfg.get('gcp_epsg', ''))),
         'format': tk.StringVar(value=cfg.get('format', 'TIFF (lossless)')),
         'to_srgb': tk.BooleanVar(value=cfg.get('to_srgb', False)),
         'workers': tk.StringVar(value=str(cfg.get('workers', 0))),
         'auto_fit': tk.BooleanVar(value=cfg.get('auto_fit', False)),
         'rows_per_plot': tk.StringVar(value=str(cfg.get('rows_per_plot', 0))),
         'fit_mode': tk.StringVar(value=cfg.get('fit_mode', 'width')),
+        'smart_seam': tk.BooleanVar(value=cfg.get('smart_seam', True)),
+        'seam_map': tk.BooleanVar(value=cfg.get('seam_map', False)),
+        'mesh_step': tk.StringVar(value=str(cfg.get('mesh_step', MESH_STEP_PX))),
     }
 
     r = 0
@@ -2418,6 +3407,19 @@ def main():
               foreground='grey').pack(side='left')
     r += 1
 
+    # CRS the GeoTIFF ground control points are written in. Geometry is
+    # normalised to EPSG:4326 internally, so without this every crop ships in
+    # degrees regardless of the grid's own CRS - which is how one delivery ended
+    # up half in 4326 and half in 7850. Coordinates are transformed, not relabelled.
+    crsrow = ttk.Frame(frm)
+    crsrow.grid(row=r, column=1, sticky='w', padx=6)
+    ttk.Label(frm, text="Output GCP CRS").grid(row=r, column=0, sticky='w', pady=3)
+    ttk.Entry(crsrow, textvariable=vars_['gcp_epsg'], width=10).pack(side='left')
+    ttk.Label(crsrow, text="EPSG code for the GeoTIFF ground control points "
+                           "(blank = 4326). Set it once for the whole project.",
+              foreground='grey').pack(side='left', padx=4)
+    r += 1
+
     add_path_row("Raw images folder (optional)", vars_['rawdir'], 'dir',
                  hint="Only needed if the .psx points to photos that were moved")
     dem_ent = add_path_row("DEM / DSM GeoTIFF (EasyIDP engine)", vars_['dem_tif'], 'file',
@@ -2459,11 +3461,12 @@ def main():
                               variable=vars_['do_raw'])
     raw_chk.pack(side='left', padx=(0, 6))
     ttk.Label(checks, text="style:").pack(side='left', padx=(0, 3))
-    raw_mode_combo = ttk.Combobox(checks, textvariable=vars_['raw_mode'], width=26,
+    raw_mode_combo = ttk.Combobox(checks, textvariable=vars_['raw_mode'], width=30,
                                   state='readonly',
                                   values=["Native (no resample, no black)",
                                           "Auto-straighten tilted", "Bounding box",
-                                          "Masked to plot", "Rectified rectangle"])
+                                          "Masked to plot", "Rectified rectangle",
+                                          "Best single frame (no stitching)"])
     raw_mode_combo.pack(side='left', padx=(0, 12))
     ttk.Label(checks, text="engine:").pack(side='left', padx=(0, 3))
     engine_combo = ttk.Combobox(checks, textvariable=vars_['engine'], width=14,
@@ -2507,6 +3510,23 @@ def main():
     ttk.Label(checks3, text="— recovers rows the grid clipped by rendering wider",
               foreground='#888').pack(side='left', padx=(8, 0))
 
+    checks4 = ttk.Frame(frm)
+    checks4.grid(row=r, column=0, columnspan=3, sticky='w', pady=(4, 0))
+    r += 1
+    seam_chk = ttk.Checkbutton(
+        checks4, text="Seamless stitching (min-error seam + feathered colour match)",
+        variable=vars_['smart_seam'])
+    seam_chk.pack(side='left')
+    ttk.Label(checks4, text="rectify grid:").pack(side='left', padx=(18, 3))
+    mesh_combo = ttk.Combobox(checks4, textvariable=vars_['mesh_step'], width=5,
+                              state='readonly', values=["48", "96", "192", "256"])
+    mesh_combo.pack(side='left')
+    ttk.Label(checks4, text="px cells (smaller = more exact, slower)",
+              foreground='#888').pack(side='left', padx=(4, 0))
+    seammap_chk = ttk.Checkbutton(checks4, text="save seam map (QC)",
+                                  variable=vars_['seam_map'])
+    seammap_chk.pack(side='left', padx=(18, 0))
+
     def toggle_source(*_):
         ortho_only = vars_['source'].get().startswith('Orthomosaic')
         psx_ent.configure(state='disabled' if ortho_only else 'normal')
@@ -2514,10 +3534,22 @@ def main():
         raw_chk.configure(state='disabled' if ortho_only else 'normal')
         raw_mode_combo.configure(state='disabled' if ortho_only else 'readonly')
         srgb_chk.configure(state='disabled' if ortho_only else 'normal')
+        for wdg in (seam_chk, mesh_combo, seammap_chk):
+            wdg.configure(state='disabled' if ortho_only else
+                          ('readonly' if wdg is mesh_combo else 'normal'))
         if ortho_only:
             vars_['do_ortho'].set(True)
     vars_['source'].trace_add('write', toggle_source)
+
+    def toggle_seam(*_):
+        # stitching controls only mean something when frames are being stitched
+        stitching = vars_['raw_mode'].get().startswith(('Rectified', 'Auto-straighten'))
+        if not vars_['source'].get().startswith('Orthomosaic'):
+            seam_chk.configure(state='normal' if stitching else 'disabled')
+            seammap_chk.configure(state='normal' if stitching else 'disabled')
+    vars_['raw_mode'].trace_add('write', toggle_seam)
     toggle_source()
+    toggle_seam()
 
     btns = ttk.Frame(frm)
     btns.grid(row=r, column=0, columnspan=3, sticky='ew', pady=8)
@@ -2532,6 +3564,10 @@ def main():
     edit_btn.pack(side='left', padx=8)
     tile_btn = ttk.Button(btns, text="Make tiled copy")
     tile_btn.pack(side='left', padx=8)
+    fixgrid_btn = ttk.Button(btns, text="Correct grid to rows…")
+    fixgrid_btn.pack(side='left', padx=8)
+    setcrs_btn = ttk.Button(btns, text="Set CRS of existing crops…")
+    setcrs_btn.pack(side='left', padx=8)
     prog = ttk.Progressbar(btns, mode='determinate')
     prog.pack(side='left', fill='x', expand=True, padx=8)
 
@@ -2625,6 +3661,7 @@ def main():
                               limit=int(vars_['limit'].get() or 0),
                               quality=int(vars_['quality'].get() or 92),
                               crs_override=vars_['crs_override'].get(),
+                              gcp_epsg=vars_['gcp_epsg'].get().strip(),
                               format=vars_['format'].get())
             else:
                 params = dict(source='metashape', psx=psx, plots=plots, outdir=outdir,
@@ -2639,8 +3676,12 @@ def main():
                               raw_mode={"Native (no resample, no black)": "native",
                                         "Auto-straighten tilted": "auto",
                                         "Bounding box": "bbox", "Masked to plot": "mask",
-                                        "Rectified rectangle": "rectify"}.get(
+                                        "Rectified rectangle": "rectify",
+                                        "Best single frame (no stitching)": "best"}.get(
                                             vars_['raw_mode'].get(), "native"),
+                              smart_seam=vars_['smart_seam'].get(),
+                              seam_map=vars_['seam_map'].get(),
+                              mesh_step=int(vars_['mesh_step'].get() or 96),
                               engine={"Metashape API": "metashape",
                                       "EasyIDP": "easyidp"}.get(
                                           vars_['engine'].get(), "metashape"),
@@ -2652,6 +3693,7 @@ def main():
                               rows_per_plot=int(vars_['rows_per_plot'].get() or 0),
                               fit_mode=vars_['fit_mode'].get(),
                               crs_override=vars_['crs_override'].get(),
+                              gcp_epsg=vars_['gcp_epsg'].get().strip(),
                               format=vars_['format'].get())
         except ValueError:
             messagebox.showerror("Plot Extractor",
@@ -2715,8 +3757,92 @@ def main():
     run_btn.configure(command=on_run)
     cancel_btn.configure(command=on_cancel)
     open_btn.configure(command=on_open)
+    def on_fix_grid():
+        """Centre the plot grid on the rows that were actually drilled.
+
+        Measures every plot against the orthomosaic and writes <grid>_refit.shp
+        beside the original, with an audit CSV. It refuses when the trial is
+        drilled continuously (row pitch == plot width / rows), because then a plot
+        boundary leaves no signature in the imagery and 'centring on the rows'
+        would just be moving polygons on detection noise.
+        """
+        shp = vars_['plots'].get().strip()
+        if not shp:
+            messagebox.showwarning("Correct grid",
+                                   "Choose the plot boundaries first.")
+            return
+        ortho = vars_['ortho_tif'].get().strip()
+        if not ortho or not os.path.exists(ortho):
+            ortho = filedialog.askopenfilename(
+                title="Orthomosaic covering the trial",
+                filetypes=[("GeoTIFF", "*.tif *.tiff"), ("All files", "*.*")])
+            if not ortho:
+                return
+            vars_['ortho_tif'].set(ortho)
+        try:
+            rows = int(vars_['rows_per_plot'].get() or 0)
+        except (TypeError, ValueError):
+            rows = 0
+        out = os.path.splitext(shp)[0] + "_refit.shp"
+        fixgrid_btn.configure(state='disabled')
+        log("")
+        log("Correcting the plot grid against the orthomosaic — this reads the "
+            "whole trial, allow a few minutes.")
+
+        def work():
+            import io as _io, contextlib as _ctx
+            code, buf = 1, _io.StringIO()
+            try:
+                import grid_refit
+                argv = ["--shp", shp, "--ortho", ortho, "--out", out]
+                if rows:
+                    argv += ["--rows", str(rows)]
+                with _ctx.redirect_stdout(buf):
+                    code = grid_refit.main(argv)
+            except Exception as e:
+                buf.write("[!] grid correction failed: " + str(e))
+            for line in buf.getvalue().splitlines():
+                msg_q.put(('log', line))
+            msg_q.put(('gridfix', (code, out)))
+
+        threading.Thread(target=work, daemon=True).start()
+
+    def on_set_crs():
+        """Re-express the GCPs of an existing folder of crops in the output CRS.
+
+        For sets extracted before 'Output GCP CRS' was set, so a project does not
+        end up with some crops in one system and some in another. Pixels are not
+        touched - only the GCP block is rewritten.
+        """
+        epsg = vars_['gcp_epsg'].get().strip()
+        if not epsg.isdigit():
+            messagebox.showwarning(
+                "Set CRS",
+                "Enter the EPSG code in 'Output GCP CRS' first, "
+                "then choose the folder of crops.")
+            return
+        folder = filedialog.askdirectory(
+            title="Folder of GeoTIFF crops to re-express in EPSG:" + epsg)
+        if not folder:
+            return
+        setcrs_btn.configure(state='disabled')
+
+        def work():
+            try:
+                retag_gcps(folder, int(epsg),
+                           log=lambda m: msg_q.put(('log', str(m))))
+            except Exception as e:
+                msg_q.put(('log', "[!] could not set the CRS: " + str(e)))
+            msg_q.put(('setcrs', None))
+
+        threading.Thread(target=work, daemon=True).start()
+
     edit_btn.configure(command=on_edit_plots)
     tile_btn.configure(command=on_make_tiled)
+    fixgrid_btn.configure(command=on_fix_grid)
+    setcrs_btn.configure(command=on_set_crs)
+
+    NL = chr(10)          # newline for message-box text, kept out of literals
 
     def poll():
         try:
@@ -2738,6 +3864,34 @@ def main():
                     cancel_btn.configure(state='disabled')
                     if payload:
                         open_btn.configure(state='normal')
+                elif kind == 'setcrs':
+                    setcrs_btn.configure(state='normal')
+                elif kind == 'gridfix':
+                    code, path = payload
+                    fixgrid_btn.configure(state='normal')
+                    if code == 0 and path and os.path.exists(path):
+                        if messagebox.askyesno(
+                                "Grid corrected",
+                                "A corrected grid was written to:" + NL + NL
+                                + path + NL + NL
+                                + "Use it for the extraction?"):
+                            vars_['plots'].set(path)
+                            log(f"Plot boundaries set to the corrected grid: {path}")
+                            log("With the grid corrected, leave 'Auto-fit to rows' OFF "
+                                "— the polygon is now the plot.")
+                    elif code == 3:
+                        messagebox.showinfo(
+                            "Grid not changed",
+                            "The rows in this trial are drilled continuously across "
+                            "plots, so a plot boundary has no signature in the "
+                            "imagery and correcting the grid to the rows is not "
+                            "meaningful." + NL + NL
+                            + "The existing grid is the only definition of a plot "
+                              "edge — use it as-is with auto-fit OFF.")
+                    else:
+                        messagebox.showwarning(
+                            "Grid not corrected",
+                            "The grid could not be corrected. See the log for detail.")
                 elif kind == 'tiled_done':
                     state['running'] = False
                     run_btn.configure(state='normal')
@@ -2754,6 +3908,51 @@ def main():
         save_config()
         cancel_ev.set()
         root.destroy()
+
+    # ---- "Generate plot grid" tab -----------------------------------------
+    # Builds the plot shapefile by clicking the 4 trial corners on an
+    # orthomosaic; "Save & use" feeds it straight back into the form above.
+    def _use_grid(path):
+        vars_['plots'].set(path)
+        log(f"Plot boundaries set to the new grid: {path}")
+        nb.select(tab_extract)
+
+    try:
+        from grid_designer import build_grid_designer
+        gd = build_grid_designer(tab_grid, on_saved=_use_grid, log=log,
+                                 ortho_path=vars_['ortho_tif'].get().strip(),
+                                 crs_hint=vars_['crs_override'].get().strip())
+        gd.pack(fill='both', expand=True)
+    except Exception as e:
+        msg = ("The plot-grid designer could not be loaded:\n\n"
+               f"{e}\n\nIt needs rasterio and pyshp, and grid_designer.py next "
+               "to the application.")
+        ttk.Label(tab_grid, text=msg, justify='left', padding=20,
+                  foreground='#a00').pack(anchor='nw')
+
+    # ---- "Training tiles" tab ---------------------------------------------
+    # Cuts the per-plot crops into fixed-size tiles for labelling, and puts
+    # labelled tiles back together into one image per plot so a whole plot can be
+    # reviewed at once. Tile names follow the group's existing convention
+    # (<stem>_tile_c<col>_r<row>), so tiles drop straight into the SAM3 notebook.
+    try:
+        from tiler import build_tiles_tab
+        _out = vars_['outdir'].get().strip()
+        tt = build_tiles_tab(tab_tiles, defaults=dict(
+            src=os.path.join(_out, "RawCrops") if _out else "",
+            out=os.path.join(_out, "Tiles") if _out else "",
+            tile=int(cfg.get('tile_size', 1024)),
+            overlap=int(cfg.get('tile_overlap', 256)),
+            rows_only=bool(cfg.get('tile_rows_only', True)),
+            pitch=cfg.get('row_pitch_mm', ''),
+            plotw=cfg.get('plot_width_mm', ''),
+        ))
+        tt.pack(fill='both', expand=True)
+    except Exception as e:
+        ttk.Label(tab_tiles, justify='left', padding=20, foreground='#a00',
+                  text=("The tiling tab could not be loaded:" + NL + NL + str(e)
+                        + NL + NL + "It needs rasterio and Pillow, and tiler.py "
+                        "next to the application.")).pack(anchor='nw')
 
     root.protocol("WM_DELETE_WINDOW", on_close)
     if vars_['plots'].get():
