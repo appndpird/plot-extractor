@@ -1449,7 +1449,7 @@ def run_extraction(p, log, set_progress, cancel):
     from concurrent.futures import ThreadPoolExecutor
     raw_pool = ThreadPoolExecutor(max_workers=workers) if do_raw else None
     raw_futures = []
-    _rawcount = {'ok': 0, 'full': 0, 'done': 0}
+    _rawcount = {'ok': 0, 'full': 0, 'done': 0, 'tiny': 0}
     _rawcount_lock = threading.Lock()
     _fallback = []            # plots whose raw was too incomplete -> use ortho
 
@@ -1504,12 +1504,15 @@ def run_extraction(p, log, set_progress, cancel):
             if do_ortho and 'low coverage' in job['fit_note']:
                 with _rawcount_lock:
                     _fallback.append((job['pid'], job['row'], job['out']))
+        tiny = not err and (job['cw'] < 100 or job['ch'] < 100)
         with _rawcount_lock:
             _rawcount['done'] += 1
             if not err and job['is_rank1']:
                 _rawcount['ok'] += 1
                 if job['full']:
                     _rawcount['full'] += 1
+                if tiny:
+                    _rawcount['tiny'] += 1
         if err:
             if job['is_rank1']:
                 job['row']['note'] = (
@@ -1518,7 +1521,8 @@ def run_extraction(p, log, set_progress, cancel):
         else:
             log(f"  raw  plot {job['pid']} <- {job['cam_label']}  "
                 f"{job['cw']}x{job['ch']}px  cover {job['cov']:.0f}%"
-                f"{job['flag']}{fit_msg}{seam_msg}")
+                f"{job['flag']}{fit_msg}{seam_msg}"
+                + ("  [!] TINY CROP - plot barely visible in frame" if tiny else ""))
 
     if do_raw:
         log(f"Raw crops render in parallel across {workers} core(s) "
@@ -2013,6 +2017,12 @@ def run_extraction(p, log, set_progress, cancel):
         wcsv.writeheader()
         wcsv.writerows(manifest)
     log("")
+    if do_raw and _rawcount.get('tiny'):
+        log(f"[!] WARNING: {_rawcount['tiny']} plot(s) produced TINY crops "
+            f"(<100 px) - the cameras of the selected chunk barely see these "
+            f"plots. Almost always the WRONG CHUNK is selected (e.g. '(active)' "
+            f"resolved to another day's flight) or the plot shapefile is for a "
+            f"different trial area. Check the Chunk drop-down and re-run.")
     log(f"DONE: raw crops {ok_raw}/{len(plots)}"
         + (f" ({full_raw} with the whole plot in frame)" if do_raw else "")
         + (f", ortho crops {ok_ortho}/{len(plots)}" if do_ortho else "")
@@ -2123,11 +2133,38 @@ def retag_gcps(folder, epsg, log=print, progress=None):
     return done, same, skip, bad
 
 
-def save_geotiff(path, pil_img, gcps, tags, log):
-    """Write an RGB crop as a lossless GeoTIFF with GCPs and the source EXIF
-    copied into the GDAL metadata (readable via gdalinfo / rasterio.tags()).
+def _affine_from_gcps(pts):
+    """Least-squares affine (col,row)->(X,Y) through >=3 GCPs. Returns
+    (rasterio Affine, residuals-in-metres array) or (None, None) if the fit
+    is impossible (degenerate geometry / <3 points)."""
+    import numpy as np
+    from rasterio.transform import Affine
+    if len(pts) < 3:
+        return None, None
+    A = np.array([[g.col, g.row, 1.0] for g in pts])
+    X = np.array([g.x for g in pts])
+    Y = np.array([g.y for g in pts])
+    try:
+        cx, resx, rank, _ = np.linalg.lstsq(A, X, rcond=None)
+        cy, *_ = np.linalg.lstsq(A, Y, rcond=None)
+        if rank < 3:
+            return None, None
+    except Exception:
+        return None, None
+    res = np.hypot(A @ cx - X, A @ cy - Y)
+    return Affine(cx[0], cx[1], cx[2], cy[0], cy[1], cy[2]), res
 
-    GCPs are written in EPSG:4326 unless PE_GCP_EPSG asks for another CRS."""
+
+def save_geotiff(path, pil_img, gcps, tags, log):
+    """Write an RGB crop as a lossless GeoTIFF, georeferenced with a real
+    affine geotransform + CRS fitted through the plot GCPs, so the file opens
+    georeferenced in QGIS/GDAL directly (GCP-only files render at pixel
+    coordinates in QGIS). The GCPs themselves are preserved in the PE_GCPS
+    metadata tag, and the source EXIF is copied into the GDAL metadata.
+
+    Coordinates are EPSG:4326 unless PE_GCP_EPSG / gcp_epsg asks for another
+    CRS (a projected CRS, e.g. 7850, is required for the affine to be
+    written - lon/lat degrees are left as plain GCPs)."""
     import numpy as np
     import rasterio
     from rasterio.control import GroundControlPoint
@@ -2148,7 +2185,25 @@ def save_geotiff(path, pil_img, gcps, tags, log):
             else:
                 pts = [GroundControlPoint(row=r, col=c, x=x, y=y, z=z)
                        for r, c, x, y, z in gcps]
-            dst.gcps = (pts, CRS.from_epsg(epsg))
+            crs = CRS.from_epsg(epsg)
+            aff, res = (None, None) if not crs.is_projected else _affine_from_gcps(pts)
+            if aff is not None:
+                dst.transform = aff
+                dst.crs = crs
+                dst.update_tags(
+                    PE_GCPS=json.dumps([[g.row, g.col, g.x, g.y, g.z]
+                                        for g in pts]),
+                    PE_GCPS_EPSG=str(epsg),
+                    PE_AFFINE_RESID=(f"mean={res.mean()*1000:.2f}mm "
+                                     f"max={res.max()*1000:.2f}mm n={len(pts)}"))
+                if res.max() > 0.05:
+                    log(f"[!] {os.path.basename(path)}: affine geotag residual "
+                        f"up to {res.max()*100:.1f} cm (oblique frame?)")
+            else:
+                dst.gcps = (pts, crs)
+                if crs.is_projected:
+                    log(f"[!] {os.path.basename(path)}: affine fit failed - "
+                        f"wrote GCPs only (QGIS shows pixel coords)")
         else:
             log(f"[!] {os.path.basename(path)}: no GCPs landed inside the crop")
         if tags:
