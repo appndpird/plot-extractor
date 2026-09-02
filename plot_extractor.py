@@ -1694,6 +1694,16 @@ def run_extraction(p, log, set_progress, cancel):
                         key = (tier, -round(covq, 4), -int(crop_clear),
                                round(centre_dist, 4), over)
                     cand.append((key, cam, uvs, uvs_p, w, h, inside, aniso, gsd, covq))
+                if cand and raw_mode not in ('best',) and not prefer_nadir:
+                    # RESOLUTION demotion for the tiered native ranking: a frame
+                    # can be low-distortion yet DISTANT (a turn/climb shot) -
+                    # e.g. aniso 1.03 but half the px/metre of the best frame.
+                    # Demote candidates under 70% of the best ground resolution
+                    # by one tier so a sharp near-nadir frame wins instead.
+                    gbest = max(c[8] for c in cand)
+                    if gbest > 0:
+                        cand = [((c[0][0] + (1 if c[8] < 0.7 * gbest else 0),)
+                                 + tuple(c[0][1:]),) + c[1:] for c in cand]
                 cand.sort(key=lambda c: c[0])
                 row['cand_frames'] = str(len(cand))
                 if cand:
