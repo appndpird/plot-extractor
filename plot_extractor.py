@@ -1700,7 +1700,12 @@ def run_extraction(p, log, set_progress, cancel):
                     # e.g. aniso 1.03 but half the px/metre of the best frame.
                     # Demote candidates under 70% of the best ground resolution
                     # by one tier so a sharp near-nadir frame wins instead.
-                    gbest = max(c[8] for c in cand)
+                    # baseline from SANE frames only - a degenerate candidate
+                    # (near-horizon projection) can carry a bogus huge px/metre
+                    # that would demote every real frame equally
+                    gbest = max((c[8] for c in cand if c[7] <= 1.5),
+                                default=0) or \
+                        max((c[8] for c in cand if c[9] >= 0.5), default=0)
                     if gbest > 0:
                         cand = [((c[0][0] + (1 if c[8] < 0.7 * gbest else 0),)
                                  + tuple(c[0][1:]),) + c[1:] for c in cand]
