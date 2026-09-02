@@ -1431,7 +1431,10 @@ def run_extraction(p, log, set_progress, cancel):
             if job.get('auto_fit'):
                 crop = _apply_auto_fit(crop, job)
             if job['geotag']:
-                save_geotiff(job['out'], crop, job['gcps'], exif_tags(job['path']), log)
+                # embed the source ICC only when pixels were NOT converted to
+                # sRGB (converted pixels are sRGB, the default assumption)
+                save_geotiff(job['out'], crop, job['gcps'], exif_tags(job['path']),
+                             log, embed_icc=not to_srgb)
             else:
                 crop.save(job['out'], **save_kw)
             return (job, None)
@@ -1677,12 +1680,18 @@ def run_extraction(p, log, set_progress, cancel):
                         key = (round(aniso / 0.35) * 0.35, -round(covq, 3),
                                round(centre_dist, 3), over)
                     else:
-                        # native / mask / bbox: no warp, so what matters is how
-                        # much of the plot this frame holds (was corner count,
-                        # which is 2/4 for an 81% frame and for a 99% one alike),
-                        # then whether the crop box is clear of the image edge
-                        # (no black border), then how centred the plot is.
-                        key = (-round(covq, 4), -int(crop_clear),
+                        # native / mask / bbox: no warp, so the crop is the
+                        # BBOX of the projected plot quad. On an oblique frame
+                        # that bbox sweeps in the neighbouring plots and the
+                        # resolution smears, so rank near-nadir frames first
+                        # (tiered by foreshortening), then coverage within the
+                        # tier. A frame holding <75% of the plot is demoted a
+                        # tier (<50%: two) so a badly clipped nadir frame does
+                        # not beat a full, slightly-oblique one.
+                        tier = (0 if aniso <= 1.06 else 1 if aniso <= 1.20 else
+                                2 if aniso <= 1.50 else 3)
+                        tier += 0 if covq >= 0.75 else 1 if covq >= 0.50 else 2
+                        key = (tier, -round(covq, 4), -int(crop_clear),
                                round(centre_dist, 4), over)
                     cand.append((key, cam, uvs, uvs_p, w, h, inside, aniso, gsd, covq))
                 cand.sort(key=lambda c: c[0])
@@ -1805,12 +1814,15 @@ def run_extraction(p, log, set_progress, cancel):
                                     _p3, zg = to3d(lon, lat)
                                     gcps.append((gy, gx, lon, lat, zg))
                             else:
-                                # 3x3 grid over the margin quad, projected into crop px
+                                # 5x5 grid over the margin quad, projected into crop
+                                # px (was 3x3; the denser grid keeps >=3 points inside
+                                # a clipped crop so the affine geotag can still be fit)
                                 if len(ring_w) == 4:
                                     A, B, C, D = ring_w
                                     grid = [tuple((1-s)*(1-t)*a + s*(1-t)*b + s*t*c + (1-s)*t*d
                                                   for a, b, c, d in zip(A, B, C, D))
-                                            for s in (0.0, 0.5, 1.0) for t in (0.0, 0.5, 1.0)]
+                                            for s in (0.0, 0.25, 0.5, 0.75, 1.0)
+                                            for t in (0.0, 0.25, 0.5, 0.75, 1.0)]
                                 else:
                                     grid = [tuple(q) for q in ring_w] + [(lon0, lat0)]
                                 for lon, lat in grid:
@@ -2133,6 +2145,34 @@ def retag_gcps(folder, epsg, log=print, progress=None):
     return done, same, skip, bad
 
 
+_icc_cache = {}
+_icc_lock = threading.Lock()
+
+
+def _source_icc_b64(src_path):
+    """Base64 ICC profile of a source image (e.g. Phase One JPEGs carry
+    Adobe RGB 1998), cached per file. Returns None if absent/unreadable.
+    Embedding it in the crop keeps the colours meaning exactly what they
+    meant in the source - without it, viewers assume sRGB and shift them."""
+    if not src_path:
+        return None
+    with _icc_lock:
+        if src_path in _icc_cache:
+            return _icc_cache[src_path]
+    b64 = None
+    try:
+        import base64
+        from PIL import Image as _Im
+        icc = _Im.open(src_path).info.get('icc_profile')
+        if icc:
+            b64 = base64.b64encode(icc).decode('ascii')
+    except Exception:
+        pass
+    with _icc_lock:
+        _icc_cache[src_path] = b64
+    return b64
+
+
 def _affine_from_gcps(pts):
     """Least-squares affine (col,row)->(X,Y) through >=3 GCPs. Returns
     (rasterio Affine, residuals-in-metres array) or (None, None) if the fit
@@ -2155,7 +2195,7 @@ def _affine_from_gcps(pts):
     return Affine(cx[0], cx[1], cx[2], cy[0], cy[1], cy[2]), res
 
 
-def save_geotiff(path, pil_img, gcps, tags, log):
+def save_geotiff(path, pil_img, gcps, tags, log, embed_icc=True):
     """Write an RGB crop as a lossless GeoTIFF, georeferenced with a real
     affine geotransform + CRS fitted through the plot GCPs, so the file opens
     georeferenced in QGIS/GDAL directly (GCP-only files render at pixel
@@ -2173,6 +2213,9 @@ def save_geotiff(path, pil_img, gcps, tags, log):
     prof = dict(driver='GTiff', height=arr.shape[0], width=arr.shape[1], count=3,
                 dtype='uint8', compress='lzw', photometric='RGB',
                 tiled=True, blockxsize=512, blockysize=512, bigtiff='IF_SAFER')
+    icc = _source_icc_b64((tags or {}).get('SOURCE_IMAGE')) if embed_icc else None
+    if icc:
+        prof['SOURCE_ICC_PROFILE'] = icc     # GDAL writes the TIFF ICC tag
     with rasterio.open(path, 'w', **prof) as dst:
         dst.write(arr.transpose(2, 0, 1))
         if gcps:
