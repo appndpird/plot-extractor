@@ -14,7 +14,8 @@ Australia) for the WA node of the Australian Plant Phenomics Network (APPN).
 
 **Download:** [latest release](https://github.com/appndpird/plot-extractor/releases/latest)
 (Windows 64-bit, no Python needed) · **Guide:**
-[User Guide (PDF)](docs/PlotExtractor_User_Guide.pdf)
+[User Guide (PDF)](docs/PlotExtractor_User_Guide.pdf) ·
+[Technical Report (PDF)](docs/PlotExtractor_Technical_Report.pdf)
 
 ## Why
 
@@ -136,6 +137,9 @@ pixel box per plot) and `candidates.csv` (every photo that sees each plot).
 
 - [User Guide (PDF)](docs/PlotExtractor_User_Guide.pdf) - every tab, step by step, with
   screenshots, recommended settings and troubleshooting.
+- [Technical Report (PDF)](docs/PlotExtractor_Technical_Report.pdf) - methods and the
+  experiments on the York 2025 calibration trial (fidelity, rows, tiles, frame coverage,
+  JPEG vs IIQ-Direct, with block diagrams of both methods).
 - The *Reference* part below is the detailed description of every option.
 
 ## Run from source
@@ -160,7 +164,7 @@ tabs, build `iiq_tools\p1tool.exe` with `iiq_tools\build_p1tool.bat "<ImageSDK f
 | `iiq_tools/` | `src/p1tool.cpp` (Phase One ImageSDK helper), `build_p1tool.bat`, development presets |
 | `tiler.py`, `row_detect.py` | Tab 6, training tiles and row detection |
 | `qa.py` | Tab 7, quality checks |
-| `docs/` | User Guide (PDF), images, older presentation and demo scripts |
+| `docs/` | User Guide and Technical Report (PDF), images, older presentation and demo scripts |
 | `THIRD_PARTY_NOTICES.md` | APPN-UQ MIT licence and Phase One SDK note |
 
 ## Acknowledgements
