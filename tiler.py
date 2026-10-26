@@ -136,10 +136,260 @@ def _plot_mm_px(src):
         return None
 
 
+def _usable_length(small, across_axis, det, band, mm_small, ext_margin_mm, end_margin_mm):
+    """Along-plot span (reduced-copy pixels) where middle-row tiles may sit.
+
+    The plot ends are bare soil (or the black mask / frame edge of a raw crop), and
+    tiles there teach a model that empty ground is part of a plot. So:
+      data ends     first/last along position where the band is fully imaged
+      plot ends     data ends moved in by the extraction margin (manifest margin_m)
+      planted ends  where the vegetation share in the band reaches 35 % of its
+                    median over the central half of the plot (only used when the
+                    planted length is at least half the plot: sparse emergence
+                    must not shrink the plot to a few clumps)
+      usable        the tighter of plot/planted ends, moved in by end_margin_mm.
+    Returns dict(u0, u1, d0, d1, p0, p1, trim) in reduced-copy pixels."""
+    a = small[:3].astype(np.float32)
+    if across_axis == 1:                        # make axis 1 = across, axis 2 = along
+        a = a.transpose(0, 2, 1)
+    R, G, B = a[0], a[1], a[2]
+    valid = a.max(axis=0) > 4
+    with np.errstate(all="ignore"):
+        exg = (2 * G - R - B) / np.maximum(R + G + B, 1e-6)
+    thr = det.get("veg_threshold", np.nan)
+    veg = valid & (exg > (thr if np.isfinite(thr) else 0.05))
+    na, nl = valid.shape
+    t = math.tan(math.radians(det["angle_deg"]))
+    lc = det["along_centre"]
+    u = np.arange(na, dtype=np.float32)[:, None] - t * (np.arange(nl, dtype=np.float32)[None, :] - lc)
+    inb = (u >= band[0]) & (u < band[1])
+    bcnt = inb.sum(axis=0)
+    vcnt = (valid & inb).sum(axis=0)
+    data = (bcnt > 0) & (vcnt >= 0.9 * np.maximum(bcnt, 1))
+    idx = np.nonzero(data)[0]
+    if not len(idx):
+        return dict(u0=0, u1=nl, d0=0, d1=nl, p0=0, p1=nl, trim="none")
+    d0, d1 = int(idx[0]), int(idx[-1]) + 1
+    px_per_mm = (1.0 / mm_small) if mm_small else None
+    em = int(round(ext_margin_mm * px_per_mm)) if (px_per_mm and ext_margin_mm) else 0
+    p0, p1 = d0 + em, d1 - em
+    if p1 - p0 < 8:
+        p0, p1 = d0, d1
+    trim = "plot ends"
+    gfrac = np.where(data, (veg & inb).sum(axis=0) / np.maximum(vcnt, 1), 0.0)
+    k = int(round(300.0 * px_per_mm)) if px_per_mm else max(5, nl // 25)
+    g = _smooth(gfrac.astype(np.float32), max(3, k | 1))
+    q = (p1 - p0) // 4
+    ref = float(np.median(g[p0 + q:p1 - q])) if p1 - p0 > 8 else 0.0
+    if ref > 0:
+        on = np.nonzero((g >= 0.35 * ref) & data)[0]
+        on = on[(on >= p0) & (on < p1)]
+        if len(on) and (on[-1] + 1 - on[0]) >= 0.5 * (p1 - p0):
+            if on[0] > p0 or on[-1] + 1 < p1:
+                trim = "planted ends"
+            p0, p1 = max(p0, int(on[0])), min(p1, int(on[-1]) + 1)
+    if px_per_mm:
+        e = int(round(end_margin_mm * px_per_mm))
+    else:                                       # no ground scale: 8 % of the plot
+        e = int(round(0.08 * (p1 - p0)))
+    return dict(u0=p0 + e, u1=p1 - e, d0=d0, d1=d1, p0=p0, p1=p1, trim=trim)
+
+
+def _pick(cand, n, how, rnd):
+    """n of the candidate tiles: 'random' sample or 'spread' (evenly spaced along
+    the plot). n = 0 or n >= len(cand) keeps them all."""
+    if not n or n >= len(cand):
+        return list(cand)
+    if how == "spread":
+        idx = sorted(set(int(round(i)) for i in np.linspace(0, len(cand) - 1, n)))
+        return [cand[i] for i in idx]
+    return sorted(rnd.sample(cand, n))
+
+
+def _middle_row_cands(s, W, H, across_axis, n_middle, rows_expected, src_mm,
+                      row_pitch_mm, band_tile, win_px, overlap, qa_path=None,
+                      ext_margin_mm=0.0, end_margin_mm=500.0):
+    """Tile candidates covering the n_middle central crop rows of one plot.
+
+    Rows are found with row_detect (the PhenoFuse RGB row detection) on a reduced
+    copy of the crop; the band of the middle rows follows the rows' tilt, so it also
+    works on unrectified raw crops. band_tile: square tiles whose side is the band
+    width, laid end to end along the plot (native pixels, no overlap); otherwise
+    win_px tiles centred on the band. Along the plot the tiles stay inside the
+    usable length (_usable_length: away from the bare plot ends by end_margin_mm)
+    and are centred in it.
+
+    Returns (cand, info): cand = [(col, row, x, y, side)], info = per-plot report."""
+    import row_detect as rd
+    dec = max(1, int(round(min(W, H) / 1200.0)))
+    small = s.read([1, 2, 3], out_shape=(3, max(1, H // dec), max(1, W // dec)))
+    sx = W / float(small.shape[2]); sy = H / float(small.shape[1])
+    det = rd.detect_rows(small, across_axis=across_axis,
+                         mm_px=(src_mm * sx) if src_mm else None,
+                         pitch_mm=row_pitch_mm or None, rows_expected=rows_expected)
+    f = sy if across_axis == 0 else sx                 # across scale small -> full
+    fl = sx if across_axis == 0 else sy                # along scale
+    info = dict(ok=det.get("ok", False), reason=det.get("reason", ""),
+                rows_found=len(det.get("plot_rows", [])),
+                rows_present=det.get("n_rows_present", 0),
+                pitch_px=round(det["pitch_px"] * f, 1) if det.get("ok") else "",
+                pitch_mm=(round(det["pitch_px"] * f * src_mm, 1)
+                          if (det.get("ok") and src_mm) else ""),
+                angle_deg=round(det.get("angle_deg", 0.0), 2), band_lo="", band_hi="",
+                veg_mode=det.get("veg_mode", ""),
+                middle_rows="")
+    if not det.get("ok"):
+        return [], info
+    info["_det"] = (det, f, fl)
+    band = rd.middle_band(det, n_middle)
+    if band is None:
+        info["reason"] = (f"only {len(det['plot_rows'])} row(s) found, "
+                          f"{n_middle} middle rows asked")
+        if qa_path:
+            rd.draw_rows(np.transpose(small, (1, 2, 0)), det).save(qa_path, quality=88)
+        return [], info
+    lo, hi, blk = band[0] * f, band[1] * f, band[2]
+    info["_det"] = (det, f, fl, blk)
+    k0 = det["plot_rows"].index(blk[0])
+    info.update(band_lo=int(lo), band_hi=int(hi),
+                middle_rows=f"{k0 + 1}-{k0 + len(blk)} of {len(det['plot_rows'])}")
+    across_len = H if across_axis == 0 else W
+    along_len = W if across_axis == 0 else H
+    side = int(round(hi - lo)) if band_tile else int(win_px)
+    side = max(8, min(side, across_len))
+    stride = side if band_tile else max(1, side - max(0, overlap))
+    # the rows may be tilted in a raw (unrectified) crop: the band centre moves
+    # across by tan(angle) per pixel along (angle measured in the reduced copy)
+    t = math.tan(math.radians(det["angle_deg"]))
+    lc_full = det["along_centre"] * fl
+    centre0 = (lo + hi) / 2.0
+    # along the plot: only the usable length, tiles centred in it
+    us = _usable_length(small, across_axis, det, band,
+                        (src_mm * fl) if src_mm else None, ext_margin_mm, end_margin_mm)
+    u0, u1 = us["u0"] * fl, us["u1"] * fl
+    span = u1 - u0
+    if band_tile:
+        n_fit = int(span // side)
+        if n_fit == 0 and span >= 0.6 * side:   # one tile, centred, ends just beyond
+            n_fit = 1
+        first = u0 + (span - n_fit * side) / 2.0
+        starts = [int(round(first + i * side)) for i in range(n_fit)]
+    else:
+        starts = _starts(int(round(u0)), int(round(u1)), side, stride) if span >= side else []
+    mm = src_mm or 0.0
+    info.update(plot_len_m=round((us["p1"] - us["p0"]) * fl * mm / 1000.0, 2) if mm else "",
+                usable_lo=int(u0), usable_hi=int(u1),
+                usable_len_m=round(max(0.0, span) * mm / 1000.0, 2) if mm else "",
+                end_trim=us["trim"], tiles_fit=len(starts))
+    cand = []
+    for c_i, l0 in enumerate(starts):
+        l0 = max(0, min(l0, along_len - side))
+        mid_along = l0 + side / 2.0
+        a_c = centre0 + t * (mid_along - lc_full) * (f / fl)
+        a0 = int(round(a_c - side / 2.0))
+        a0 = max(0, min(a0, across_len - side))
+        x, y = (l0, a0) if across_axis == 0 else (a0, l0)
+        cand.append((c_i, 0, x, y, side))
+    if not cand:
+        info["reason"] = (f"usable length {max(0.0, span) * mm / 1000.0:.2f} m is shorter "
+                          "than one tile" if mm else "usable length shorter than one tile")
+    info["_qa"] = (qa_path, small, det, band, us, fl) if qa_path else None
+    return cand, info
+
+
+def _write_middle_qa(qa, W, H, across_axis, cand_all, cand_kept):
+    """QA picture: rows (green), middle band (yellow), plot ends (grey), usable
+    length limits (orange), candidate tiles (thin blue) and the tiles written
+    (thick cyan, numbered)."""
+    import row_detect as rd
+    from PIL import ImageDraw
+    qa_path, small, det, band, us, fl = qa
+    im = rd.draw_rows(np.transpose(small, (1, 2, 0)), det, band=band)
+    sc = im.size[0] / float(W)
+    dr = ImageDraw.Draw(im)
+
+    def across_line(v, col, width):
+        v = v * fl * sc
+        if across_axis == 0:
+            dr.line([(v, 0), (v, im.size[1])], fill=col, width=width)
+        else:
+            dr.line([(0, v), (im.size[0], v)], fill=col, width=width)
+    across_line(us["p0"], (150, 150, 150), 2)
+    across_line(us["p1"], (150, 150, 150), 2)
+    across_line(us["u0"], (255, 140, 0), 3)
+    across_line(us["u1"], (255, 140, 0), 3)
+    kept = set((x, y) for (_c, _r, x, y, _s) in cand_kept)
+    for (_c, _r, x, y, sd) in cand_all:
+        if (x, y) not in kept:
+            dr.rectangle([x * sc, y * sc, (x + sd) * sc, (y + sd) * sc],
+                         outline=(0, 120, 255), width=1)
+    for k, (_c, _r, x, y, sd) in enumerate(cand_kept, 1):
+        dr.rectangle([x * sc, y * sc, (x + sd) * sc, (y + sd) * sc],
+                     outline=(0, 230, 255), width=4)
+        dr.text((x * sc + 6, y * sc + 4), str(k), fill=(0, 230, 255))
+    im.save(qa_path, quality=88)
+
+
+def _save_rows(s, W, H, across_axis, det_job, rows_dir, stem, ext):
+    """Write each of the plot's crop rows as its own image: <stem>_row<k><ext>, k = 1..n
+    across the plot (from image top / left). The image is the axis-aligned box around
+    the row's band (row centre +- half a pitch, following the rows' tilt), full plot
+    length; pixels outside the band are set to 0, everything inside is the crop's own
+    pixels (no resampling - the row strip of a raw crop is original camera pixels).
+    Returns one index record per row."""
+    import rasterio.windows
+    from PIL import Image
+    det, f, fl = det_job[:3]
+    blk = set(det_job[3]) if len(det_job) > 3 else set()
+    across_len = H if across_axis == 0 else W
+    along_len = W if across_axis == 0 else H
+    P = det["pitch_px"] * f
+    t = math.tan(math.radians(det["angle_deg"])) * (f / fl)
+    lc = det["along_centre"] * fl
+    os.makedirs(rows_dir, exist_ok=True)
+    out = []
+    al = np.arange(along_len, dtype=np.float64)
+    for k, ri in enumerate(det["plot_rows"], 1):
+        c = det["rows"][ri] * f
+        lo_l = c - P / 2.0 + t * (al - lc)               # band edges along the plot
+        hi_l = c + P / 2.0 + t * (al - lc)
+        a0 = int(max(0, math.floor(lo_l.min())))
+        a1 = int(min(across_len, math.ceil(hi_l.max())))
+        if a1 - a0 < 4:
+            continue
+        if across_axis == 0:
+            win = rasterio.windows.Window(0, a0, W, a1 - a0)
+        else:
+            win = rasterio.windows.Window(a0, 0, a1 - a0, H)
+        a = s.read([1, 2, 3], window=win)              # 3 x h x w
+        acr = np.arange(a0, a1, dtype=np.float64)
+        if across_axis == 0:                            # across = image y
+            keep = (acr[:, None] >= lo_l[None, :]) & (acr[:, None] < hi_l[None, :])
+        else:                                           # across = image x
+            keep = (acr[None, :] >= lo_l[:, None]) & (acr[None, :] < hi_l[:, None])
+        a = np.where(keep[None], a, 0).astype(np.uint8)
+        name = f"{stem}_row{k}{ext}"
+        im = Image.fromarray(np.transpose(a, (1, 2, 0)))
+        if ext == ".jpg":
+            im.save(os.path.join(rows_dir, name), quality=95, subsampling=0)
+        else:
+            im.save(os.path.join(rows_dir, name))
+        x0, y0 = (0, a0) if across_axis == 0 else (a0, 0)
+        out.append(dict(file=name, plot_stem=stem, row=k, of_rows=len(det["plot_rows"]),
+                        middle=ri in blk, present=bool(det["present"][ri]),
+                        contrast=round(float(det["contrast"][ri]), 3),
+                        centre_px=round(c, 1), width_px=round(P, 1),
+                        angle_deg=round(det["angle_deg"], 2),
+                        x0=x0, y0=y0, w=a.shape[2], h=a.shape[1], across_axis=across_axis))
+    return out
+
+
 def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                row_pitch_mm=0.0, plot_width_mm=0.0, fmt="png",
                min_veg_pct=0.0, keep_empty_frac=0.15, max_tiles_per_plot=0,
                seed=7, target_mm_px=0.0, per_plot_dirs=False,
+               middle_rows=0, rows_per_plot=0, band_tile=True, write_qa=True,
+               end_margin_m=0.5, tiles_pick="random", save_rows=False,
                log=print, progress=None, cancel=None):
     """Cut every crop in `src_dir` into tiles.
 
@@ -151,9 +401,31 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                           random `keep_empty_frac` of them, kept as hard
                           negatives - bare soil and stubble is what a seedling
                           detector gets wrong, so it has to see some.
-    max_tiles_per_plot    0 = all. Otherwise a random sample per plot.
+    max_tiles_per_plot    tiles per plot, every mode. 0 = all. Otherwise picked by
+                          tiles_pick; on the plain grid 'random' back-fills tiles
+                          dropped as nodata / low vegetation.
     per_plot_dirs         write each plot's tiles into its own subfolder
                           out_dir/<plot stem>/ instead of one flat folder.
+    middle_rows           > 0: tile only the band holding this many CENTRAL crop
+                          rows of each plot (rows detected per plot, as in
+                          PhenoFuse); rows_only is ignored. With
+                          max_tiles_per_plot, that many tiles are drawn at random
+                          from the band.
+    rows_per_plot         sown rows per plot, if known (0 = the run of rows found).
+    band_tile             middle-rows mode: square tiles as wide as the band
+                          (native pixels, end to end); False = `tile` px tiles.
+    write_qa              middle-rows mode: out_dir/_rows_qa/<plot>_rows.jpg with
+                          the detected rows, the band and the tiles, plus
+                          rows_report.csv.
+    end_margin_m          middle-rows mode: keep tiles this far (metres) inside the
+                          plot ends (after trimming to the planted length); the
+                          tiles are centred in what is left.
+    tiles_pick            with max_tiles_per_plot: 'random' or 'spread' (evenly
+                          spaced along the plot).
+    save_rows             middle-rows mode: also write every detected crop row of
+                          each plot as its own image, out_dir/Rows/<plot>/
+                          <plot>_row<k>.<ext> (original crop pixels, outside the
+                          row masked to 0), indexed in Rows/rows_index.csv.
 
     Returns (n_tiles, n_plots, index_path).
     """
@@ -170,9 +442,40 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
     stride = max(1, tile - max(0, overlap))
     rnd = random.Random(seed)
     rows_out = []
-    log(f"Tiling {len(files)} plot(s): {tile}px tiles, {overlap}px overlap "
-        f"(stride {stride}), {'row band only' if rows_only else 'whole crop'}, "
-        f"{ext[1:].upper()} output.")
+    row_reports = []
+    row_files = []
+    # extraction margin per crop (manifest.csv next to RawCrops): the plot's own
+    # ends lie that far inside the crop ends
+    ext_margin = {}
+    for mf in (os.path.join(os.path.dirname(os.path.abspath(src_dir)), "manifest.csv"),
+               os.path.join(src_dir, "manifest.csv")):
+        if os.path.exists(mf):
+            try:
+                with open(mf, newline="", encoding="utf-8") as fh:
+                    for rr in csv.DictReader(fh):
+                        try:
+                            ext_margin[rr.get("raw_file", "")] = float(rr.get("margin_m") or 0)
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
+            break
+    if middle_rows > 0:
+        log(f"Tiling {len(files)} plot(s): the {middle_rows} middle crop rows of each "
+            f"plot (rows detected per plot"
+            + (f", {rows_per_plot} sown rows" if rows_per_plot else "") + "), "
+            + ("square tiles spanning the band, native pixels" if band_tile
+               else f"{tile}px tiles on the band")
+            + f", tiles kept {end_margin_m:.2f} m inside the planted plot ends"
+            + (f", {max_tiles_per_plot} tile(s) per plot ({tiles_pick})" if max_tiles_per_plot
+               else ", every tile that fits")
+            + f", {ext[1:].upper()} output.")
+    else:
+        log(f"Tiling {len(files)} plot(s): {tile}px tiles, {overlap}px overlap "
+            f"(stride {stride}), {'row band only' if rows_only else 'whole crop'}"
+            + (f", {max_tiles_per_plot} tile(s) per plot ({tiles_pick})" if max_tiles_per_plot
+               else ", every tile")
+            + f", {ext[1:].upper()} output.")
 
     for fi, fn in enumerate(files):
         if cancel is not None and cancel.is_set():
@@ -191,9 +494,11 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                 # another. Reading a window sized in GROUND units and resampling it
                 # to `tile` px makes every tile the same real size, which is what a
                 # "cover ~3 rows" requirement actually asks for.
-                src_mm = _plot_mm_px(s) if target_mm_px > 0 else None
+                src_mm = _plot_mm_px(s) if (target_mm_px > 0 or middle_rows > 0) else None
+                if src_mm is None and middle_rows > 0 and plot_width_mm > 0:
+                    src_mm = plot_width_mm / float(H if across_axis == 0 else W)
                 win_px = tile
-                if src_mm and src_mm > 0:
+                if target_mm_px > 0 and src_mm and src_mm > 0:
                     win_px = max(8, int(round(tile * target_mm_px / src_mm)))
                 if row_pitch_mm > 0 and plot_width_mm > 0:
                     across_px = H if across_axis == 0 else W
@@ -201,7 +506,42 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                 else:
                     pitch_px = (H if across_axis == 0 else W) / 5.5
                 lo, hi = 0, (H if across_axis == 0 else W)
-                if rows_only:
+                if middle_rows > 0:
+                    qa = None
+                    if write_qa:
+                        os.makedirs(os.path.join(out_dir, "_rows_qa"), exist_ok=True)
+                        qa = os.path.join(out_dir, "_rows_qa", stem + "_rows.jpg")
+                    cand, info = _middle_row_cands(
+                        s, W, H, across_axis, middle_rows, rows_per_plot, src_mm,
+                        row_pitch_mm, band_tile, win_px, overlap, qa,
+                        ext_margin_mm=1000.0 * ext_margin.get(fn, 0.0),
+                        end_margin_mm=1000.0 * max(0.0, end_margin_m))
+                    qa_job = info.pop("_qa", None)
+                    det_job = info.pop("_det", None)
+                    if save_rows and det_job:
+                        recs = _save_rows(s, W, H, across_axis, det_job,
+                                          os.path.join(out_dir, "Rows", stem), stem, ext)
+                        for rc in recs:
+                            rc["rel_path"] = stem + "/" + rc["file"]
+                        row_files.extend(recs)
+                        info["rows_saved"] = len(recs)
+                    info = dict(plot_stem=stem, src=fn, tiles_in_band=len(cand), **info)
+                    cand_all = cand
+                    if not cand:
+                        log(f"[!] {fn}: no middle-row tiles ({info['reason']}) - skipped")
+                    else:
+                        cand = _pick(cand, max_tiles_per_plot, tiles_pick, rnd)
+                        if max_tiles_per_plot and len(cand) < max_tiles_per_plot:
+                            log(f"   {fn}: only {len(cand)} tile(s) fit, "
+                                f"{max_tiles_per_plot} asked")
+                    if qa_job:
+                        _write_middle_qa(qa_job, W, H, across_axis, cand_all, cand)
+                    info["tiles_drawn"] = len(cand)
+                    row_reports.append(info)
+                    if cand:
+                        lo = min((y if across_axis == 0 else x) for (_c, _r, x, y, _sd) in cand)
+                        hi = max((y if across_axis == 0 else x) + sd for (_c, _r, x, y, sd) in cand)
+                elif rows_only:
                     dec = max(1, int(round(min(W, H) / 900)))
                     small = s.read(out_shape=(3, max(1, H // dec), max(1, W // dec)))
                     l2, h2 = row_band(small, across_axis, pitch_px / dec)
@@ -211,23 +551,41 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                         lo = max(0, c - win_px // 2)
                         hi = min((H if across_axis == 0 else W), lo + win_px)
 
-                y0b, y1b = (lo, hi) if across_axis == 0 else (0, H)
-                x0b, x1b = (0, W) if across_axis == 0 else (lo, hi)
-                # grid is laid out in SOURCE pixels; win_px == tile unless the
-                # tiles are ground-referenced, in which case it is the source
-                # window that resamples down to `tile`.
-                src_stride = max(1, int(round(stride * win_px / tile)))
-                cand = []
-                for r_i, y in enumerate(_starts(y0b, y1b, win_px, src_stride)):
-                    for c_i, x in enumerate(_starts(x0b, x1b, win_px, src_stride)):
-                        cand.append((c_i, r_i, x, y))
-                if not cand:
-                    cand = [(0, 0, x0b, y0b)]
-                if max_tiles_per_plot and len(cand) > max_tiles_per_plot:
-                    cand = rnd.sample(cand, max_tiles_per_plot)
+                limit = 0
+                if middle_rows <= 0:
+                    y0b, y1b = (lo, hi) if across_axis == 0 else (0, H)
+                    x0b, x1b = (0, W) if across_axis == 0 else (lo, hi)
+                    # grid is laid out in SOURCE pixels; win_px == tile unless the
+                    # tiles are ground-referenced, in which case it is the source
+                    # window that resamples down to `tile`.
+                    src_stride = max(1, int(round(stride * win_px / tile)))
+                    cand = []
+                    for r_i, y in enumerate(_starts(y0b, y1b, win_px, src_stride)):
+                        for c_i, x in enumerate(_starts(x0b, x1b, win_px, src_stride)):
+                            cand.append((c_i, r_i, x, y, win_px))
+                    if not cand:
+                        cand = [(0, 0, x0b, y0b, win_px)]
+                    if max_tiles_per_plot and tiles_pick != "spread":
+                        # random: walk a shuffled list until N tiles are kept, so
+                        # tiles dropped as nodata / low vegetation are back-filled
+                        rnd.shuffle(cand)
+                        limit = max_tiles_per_plot
+                    else:
+                        cand = _pick(cand, max_tiles_per_plot, tiles_pick, rnd)
 
                 kept = 0
-                for (c_i, r_i, x, y) in cand:
+                for (c_i, r_i, x, y, side) in cand:
+                    if middle_rows <= 0 and limit and kept >= limit:
+                        break
+                    # output size: `tile` for the plain grid; a band-spanning
+                    # middle-rows tile keeps its native size unless a ground
+                    # scale is fixed (then it is resampled to that scale)
+                    if middle_rows > 0 and band_tile:
+                        out_px = (max(8, int(round(side * src_mm / target_mm_px)))
+                                  if (target_mm_px > 0 and src_mm) else side)
+                    else:
+                        out_px = tile
+                    win_px = side
                     w = min(win_px, W - x); h = min(win_px, H - y)
                     if w < win_px // 2 or h < win_px // 2:
                         continue
@@ -254,10 +612,10 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                         dest = os.path.join(out_dir, name)
                         rel = name
                     im = Image.fromarray(np.transpose(rgb, (1, 2, 0)).astype(np.uint8))
-                    if win_px != tile:
+                    if win_px != out_px:
                         # proportional, so a clipped window keeps the same scale
-                        im = im.resize((max(1, int(round(w * tile / win_px))),
-                                        max(1, int(round(h * tile / win_px)))),
+                        im = im.resize((max(1, int(round(w * out_px / win_px))),
+                                        max(1, int(round(h * out_px / win_px)))),
                                        Image.LANCZOS)
                     if ext == ".jpg":
                         im.save(dest, quality=95, subsampling=0)
@@ -265,7 +623,7 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                         im.save(dest)
                     rows_out.append(dict(tile=name, rel_path=rel, plot_stem=stem, col=c_i, row=r_i,
                                          x0=x, y0=y, w=w, h=h,
-                                         out_px=tile,
+                                         out_px=out_px,
                                          src_mm_px=round(src_mm, 4) if src_mm else "",
                                          tile_mm_px=round(target_mm_px, 4) if (src_mm and target_mm_px) else "",
                                          ground_mm=round(w * (src_mm or 0), 1) if src_mm else "",
@@ -290,6 +648,29 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
         wr.writeheader()
         for rr in rows_out:
             wr.writerow(rr)
+    if row_files:
+        ri = os.path.join(out_dir, "Rows", "rows_index.csv")
+        with open(ri, "w", newline="") as fh:
+            wr = csv.DictWriter(fh, fieldnames=list(row_files[0].keys()))
+            wr.writeheader()
+            wr.writerows(row_files)
+        log(f"Saved {len(row_files)} row images from "
+            f"{len({r['plot_stem'] for r in row_files})} plot(s) -> {os.path.dirname(ri)}")
+    if row_reports:
+        rep = os.path.join(out_dir, "rows_report.csv")
+        rkeys = ["plot_stem", "src", "ok", "reason", "rows_found", "rows_present",
+                 "pitch_px", "pitch_mm", "angle_deg", "middle_rows", "band_lo",
+                 "band_hi", "plot_len_m", "end_trim", "usable_lo", "usable_hi",
+                 "usable_len_m", "tiles_fit", "tiles_in_band", "tiles_drawn",
+                 "rows_saved", "veg_mode"]
+        with open(rep, "w", newline="") as fh:
+            wr = csv.DictWriter(fh, fieldnames=rkeys, extrasaction="ignore")
+            wr.writeheader()
+            for rr in row_reports:
+                wr.writerow(rr)
+        n_ok = sum(1 for rr in row_reports if rr["tiles_in_band"])
+        log(f"Middle rows found on {n_ok}/{len(row_reports)} plot(s); per-plot rows: "
+            f"{rep}" + ("  (pictures in _rows_qa\\)" if write_qa else ""))
     plots = len({r["plot_stem"] for r in rows_out})
     log(f"Wrote {len(rows_out)} tiles from {plots} plot(s) -> {out_dir}")
     log(f"Index: {idx}  (needed to map a tile back to its plot)")
@@ -333,9 +714,17 @@ def build_tiles_tab(parent, defaults=None):
         "mmpx": tk.StringVar(value=str(d.get("mmpx", ""))),
         "subdirs": tk.BooleanVar(value=bool(d.get("subdirs", False))),
         "keepempty": tk.StringVar(value=str(d.get("keepempty", 15))),
-        "maxtiles": tk.StringVar(value=str(d.get("maxtiles", 0))),
+        "ntiles": tk.StringVar(value=str(d.get("ntiles", 0))),
         "fmt": tk.StringVar(value=d.get("fmt", "png")),
         "seed": tk.StringVar(value=str(d.get("seed", 7))),
+        "mid_on": tk.BooleanVar(value=bool(d.get("mid_on", False))),
+        "mid_n": tk.StringVar(value=str(d.get("mid_n", 3))),
+        "mid_rows": tk.StringVar(value=str(d.get("mid_rows", 0))),
+        "mid_band": tk.BooleanVar(value=bool(d.get("mid_band", True))),
+        "mid_qa": tk.BooleanVar(value=bool(d.get("mid_qa", True))),
+        "mid_pick": tk.StringVar(value=d.get("mid_pick", "random")),
+        "mid_end": tk.StringVar(value=str(d.get("mid_end", 0.5))),
+        "mid_saverows": tk.BooleanVar(value=bool(d.get("mid_saverows", False))),
         "stitch_in": tk.StringVar(value=""),
         "stitch_out": tk.StringVar(value=""),
         "grid": tk.BooleanVar(value=True),
@@ -365,7 +754,7 @@ def build_tiles_tab(parent, defaults=None):
               font=("", 10, "bold")).grid(row=r, column=0, columnspan=3, sticky="w")
     r += 1
     path_row("Plot crops folder *", V["src"], "dir",
-             "the RawCrops folder of a rectified extraction")
+             "the RawCrops folder of an extraction (GeoTIFF/TIFF; raw or rectified)")
     path_row("Tiles output folder *", V["out"], "dir",
              "tiles are written flat here, plus tile_index.csv")
 
@@ -374,13 +763,26 @@ def build_tiles_tab(parent, defaults=None):
     r += 1
     for text, var, w in (("Tile size (px):", V["tile"], 6),
                          ("Overlap (px):", V["overlap"], 6),
-                         ("Max tiles/plot (0=all):", V["maxtiles"], 5),
                          ("Seed:", V["seed"], 4)):
         ttk.Label(o1, text=text).pack(side="left", padx=(0, 4))
         ttk.Entry(o1, textvariable=var, width=w).pack(side="left", padx=(0, 12))
     ttk.Label(o1, text="Format:").pack(side="left", padx=(0, 4))
     ttk.Combobox(o1, textvariable=V["fmt"], width=6, state="readonly",
                  values=["png", "tif", "jpeg"]).pack(side="left")
+
+    o1n = ttk.Frame(frm)
+    o1n.grid(row=r, column=0, columnspan=3, sticky="w", pady=4)
+    r += 1
+    ttk.Label(o1n, text="Tiles per plot:", font=("", 9, "bold")).pack(
+        side="left", padx=(0, 4))
+    ttk.Spinbox(o1n, from_=0, to=500, textvariable=V["ntiles"], width=5).pack(
+        side="left", padx=(0, 4))
+    ttk.Label(o1n, text="(0 = every tile that fits)").pack(side="left", padx=(0, 12))
+    ttk.Label(o1n, text="choose them:").pack(side="left", padx=(0, 4))
+    ttk.Combobox(o1n, textvariable=V["mid_pick"], width=8, state="readonly",
+                 values=["random", "spread"]).pack(side="left", padx=(0, 6))
+    ttk.Label(o1n, text="(spread = evenly spaced along the plot)",
+              foreground="grey").pack(side="left")
 
     o2 = ttk.Frame(frm)
     o2.grid(row=r, column=0, columnspan=3, sticky="w", pady=4)
@@ -394,6 +796,42 @@ def build_tiles_tab(parent, defaults=None):
     ttk.Label(frm, text="the band is measured per plot; the two numbers only "
                         "set the search scale (blank = guess)",
               foreground="grey").grid(row=r, column=0, columnspan=3, sticky="w")
+    r += 1
+
+    o2m = ttk.Frame(frm)
+    o2m.grid(row=r, column=0, columnspan=3, sticky="w", pady=4)
+    r += 1
+    ttk.Checkbutton(o2m, text="Tile only the middle", variable=V["mid_on"]).pack(
+        side="left", padx=(0, 4))
+    ttk.Spinbox(o2m, from_=1, to=12, textvariable=V["mid_n"], width=3).pack(
+        side="left", padx=(0, 4))
+    ttk.Label(o2m, text="rows of each plot;  sown rows per plot (0 = detect):").pack(
+        side="left", padx=(0, 4))
+    ttk.Spinbox(o2m, from_=0, to=24, textvariable=V["mid_rows"], width=3).pack(
+        side="left", padx=(0, 12))
+    ttk.Checkbutton(o2m, text="square tiles spanning the band",
+                    variable=V["mid_band"]).pack(side="left", padx=(0, 12))
+    ttk.Checkbutton(o2m, text="QA pictures", variable=V["mid_qa"]).pack(side="left")
+    o2n = ttk.Frame(frm)
+    o2n.grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, 4))
+    r += 1
+    ttk.Label(o2n, text="      keep tiles").pack(side="left", padx=(0, 4))
+    ttk.Entry(o2n, textvariable=V["mid_end"], width=5).pack(side="left", padx=(0, 4))
+    ttk.Label(o2n, text="m from the plot ends").pack(side="left", padx=(0, 16))
+    ttk.Checkbutton(o2n, text="also save each row as its own image (Rows\\<plot>\\)",
+                    variable=V["mid_saverows"]).pack(side="left")
+    ttk.Label(frm, text="rows are detected in every plot (PhenoFuse row detection, "
+                        "tilt-aware, works on raw and rectified crops); the band "
+                        "holds exactly the N central rows. Along the plot, tiles "
+                        "stay inside the planted length, the set distance away "
+                        "from the bare plot ends, and are centred there; 'tiles "
+                        "per plot' then takes that many (random, or 'spread' = "
+                        "evenly spaced). Give the sown rows per plot when known - "
+                        "it decides which rows are central when the grid clips an "
+                        "outer row. Set a margin at extraction so outer rows are "
+                        "whole.",
+              foreground="grey", wraplength=900, justify="left").grid(
+        row=r, column=0, columnspan=3, sticky="w")
     r += 1
 
     o2b = ttk.Frame(frm)
@@ -507,9 +945,15 @@ def build_tiles_tab(parent, defaults=None):
             row_pitch_mm=_f(V["pitch"], 0.0), plot_width_mm=_f(V["plotw"], 0.0),
             fmt=V["fmt"].get(), min_veg_pct=_f(V["minveg"], 0.0),
             keep_empty_frac=max(0.0, min(1.0, _f(V["keepempty"], 15.0) / 100.0)),
-            max_tiles_per_plot=int(_f(V["maxtiles"], 0)),
+            max_tiles_per_plot=max(0, int(_f(V["ntiles"], 0))),
             seed=int(_f(V["seed"], 7)), target_mm_px=_f(V["mmpx"], 0.0),
-            per_plot_dirs=bool(V["subdirs"].get()), log=put,
+            per_plot_dirs=bool(V["subdirs"].get()),
+            middle_rows=(int(_f(V["mid_n"], 3)) if V["mid_on"].get() else 0),
+            rows_per_plot=int(_f(V["mid_rows"], 0)),
+            band_tile=bool(V["mid_band"].get()), write_qa=bool(V["mid_qa"].get()),
+            end_margin_m=_f(V["mid_end"], 0.5), tiles_pick=V["mid_pick"].get() or "random",
+            save_rows=bool(V["mid_saverows"].get()),
+            log=put,
             progress=lambda a, b: q.put(("prog", (a, b))), cancel=cancel_ev))
 
     def on_stitch():

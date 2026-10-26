@@ -41,3 +41,9 @@ Desktop.ini
 
 # ---- local dated snapshot copies ----
 /PlotExtractor-20*/
+
+# ---- Phase One ImageSDK runtime and binaries built against it (licensed by Phase One A/S;
+#      in the application build only, never in this repository) ----
+iiq_tools/sdk/
+iiq_tools/obj/
+iiq_config.json

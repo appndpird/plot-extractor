@@ -24,10 +24,21 @@ hidden += ["PIL.ImageTk", "PIL.ImageCms", "PIL._tkinter_finder",
            # the "Correct grid to rows" button imports this lazily
            "grid_refit",
            # the "Training tiles" tab imports this lazily
-           "tiler"]
+           "tiler",
+           # ...and the middle-rows option imports the row detector lazily
+           "row_detect",
+           "qa",
+           # the IIQ tabs (Phase One SDK via iiq_tools\p1tool.exe)
+           "iiq"]
 
 # app assets (logos + icon) -> _internal/assets, found via sys._MEIPASS
 datas += [(os.path.join(APP, "assets"), "assets")]
+# IIQ tabs: p1tool.exe + presets + the Phase One SDK runtime (licensed by Phase One A/S;
+# in the application build only, never in the source repository) -> _internal/iiq_tools
+datas += [(os.path.join(APP, "iiq_tools", "p1tool.exe"), "iiq_tools"),
+          (os.path.join(APP, "iiq_tools", "presets"), os.path.join("iiq_tools", "presets")),
+          (os.path.join(APP, "iiq_tools", "sdk"), os.path.join("iiq_tools", "sdk")),
+          (os.path.join(APP, "THIRD_PARTY_NOTICES.md"), ".")]
 
 a = Analysis(
     [os.path.join(APP, "plot_extractor.py")],

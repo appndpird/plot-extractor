@@ -284,7 +284,7 @@ class _Designer(object):
 # GUI
 # --------------------------------------------------------------------------
 def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
-                        crs_hint=''):
+                        crs_hint='', out_epsg_var=None, on_crs=None):
     """Build the grid designer as a ttk.Frame child of `parent` and return it.
 
     The frame is NOT packed or gridded — the caller places it, so the same UI
@@ -297,6 +297,10 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
     log         : message sink, defaults to print
     ortho_path  : optional GeoTIFF to load as soon as the frame is realised
     crs_hint    : shown in the status bar when the raster carries no CRS
+    out_epsg_var: optional tk StringVar with the EPSG code the grid is saved in
+                  (default 7850, GDA2020 / MGA zone 50); reprojected from the ortho CRS
+    on_crs      : optional callback(rasterio CRS, (lon, lat)) after an ortho is loaded,
+                  so the host can make the output CRS follow the orthomosaic
 
     Returns the frame with the controller attached as `frame.designer`.
     """
@@ -337,6 +341,7 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
     v_pl = tk.StringVar(value='4.00')
     v_grow = tk.StringVar(value='0.20')
     v_grange = tk.StringVar(value='0.50')
+    v_epsg = out_epsg_var if out_epsg_var is not None else tk.StringVar(value='7850')
 
     def _err(title, msg):
         """Report a failure through both sinks; dialogs are skippable so the
@@ -562,6 +567,13 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
                 src['geographic'] = False
             clat = (b.bottom + b.top) / 2.0
             src['mpx'], src['mpy'] = metres_per_unit(crs, clat)
+            if on_crs is not None and crs is not None:
+                try:
+                    from rasterio.warp import transform as _tf
+                    lon, lat = _tf(crs, 'EPSG:4326', [(b.left + b.right) / 2.0], [clat])
+                    on_crs(crs, (lon[0], lat[0]))
+                except Exception as e:
+                    log("[!] could not take the output CRS from the ortho: %s" % e)
             k['v'] = src['mpy'] / src['mpx'] if src['mpx'] else 1.0
             del corners[:]
             del grid[:]
@@ -664,18 +676,36 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
         if not path:
             return None
         try:
+            out_plots, out_crs = plots, src['crs']
+            e = v_epsg.get().strip()
+            if e.isdigit() and src['crs'] is not None:
+                from rasterio.crs import CRS
+                from rasterio.warp import transform
+                dst = CRS.from_epsg(int(e))
+                if dst != src['crs']:
+                    out_plots = []
+                    for pl in plots:
+                        xs, ys = transform(src['crs'], dst, [p[0] for p in pl['ring']],
+                                           [p[1] for p in pl['ring']])
+                        out_plots.append({'ring': list(zip(xs, ys)), 'props': pl['props']})
+                out_crs = dst
+            elif e:
+                log("[!] grid CRS '%s' not used (ortho has no CRS or not an EPSG "
+                    "number) - saved in the ortho's CRS" % e)
             if os.path.splitext(path)[1].lower() in ('.geojson', '.json'):
-                write_grid_geojson(path, plots, src['crs'])
+                write_grid_geojson(path, out_plots, out_crs)
             else:
                 if not path.lower().endswith('.shp'):
                     path += '.shp'
-                write_grid_shapefile(path, plots, src['crs'])
+                write_grid_shapefile(path, out_plots, out_crs)
         except Exception as e:
             _err("Save grid", "Could not save the grid:\n%s" % e)
             return None
         del grid[:]
         grid.extend(plots)
-        log("Grid saved: %s  (%d plots)" % (path, len(plots)))
+        log("Grid saved: %s  (%d plots, %s)" % (
+            path, len(plots), ('EPSG:%s' % out_crs.to_epsg()) if out_crs is not None
+            and out_crs.to_epsg() else 'ortho CRS'))
         if and_use:
             if on_saved is not None:
                 try:
@@ -773,6 +803,10 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
     field("Gap between ranges (m)", v_grange)
     ttk.Checkbutton(params, text="Stretch grid to fit the 4 clicked corners",
                     variable=fit_var).pack(side='left', padx=(4, 0))
+    fe = ttk.Frame(params)
+    fe.pack(side='left', padx=(14, 0))
+    ttk.Label(fe, text="Save in CRS (EPSG)", font=('Segoe UI', 8)).pack(anchor='w')
+    ttk.Entry(fe, textvariable=v_epsg, width=8).pack(anchor='w')
 
     # ---- bindings (canvas-local, so an embedded tab cannot steal the host
     # window's own shortcuts; the canvas takes focus on mouse-enter) -------
@@ -813,7 +847,8 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
         corners=corners, grid=grid, src=src, basemap=bm, buttons=btns,
         vars={'order': order_var, 'pan_mode': pan_mode, 'fit': fit_var,
               'ranges': v_ranges, 'rows': v_rows, 'plot_w': v_pw,
-              'plot_l': v_pl, 'gap_row': v_grow, 'gap_range': v_grange},
+              'plot_l': v_pl, 'gap_row': v_grow, 'gap_range': v_grange,
+              'epsg': v_epsg},
         load_ortho=load_ortho, preview=preview, save=save,
         build_grid=build_grid, add_corner=add_corner,
         clear_corners=clear_corners, undo_corner=undo_corner,

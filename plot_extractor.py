@@ -8,7 +8,7 @@ margin, images per plot, limit.
 Runs on any Python 3.9+ with: Metashape (standalone wheel), Pillow, pyshp.
 Launch with PlotExtractor.bat or:  python plot_extractor.py
 """
-import os, sys, re, json, math, csv, threading, queue, traceback
+import os, sys, re, json, math, csv, shutil, threading, queue, traceback
 
 # Metashape standalone module license (floating license server config lives here)
 os.environ.setdefault('agisoft_LICENSE', r"C:\Program Files\Agisoft\Licensing\licenses")
@@ -22,6 +22,8 @@ else:
 CONFIG_PATH = os.path.join(APP_DIR, "config.json")
 RAW_EXTS = ['.jpg', '.jpeg', '.tif', '.tiff', '.png']
 AUTO_ID = "(auto: plot id field or 1..N)"
+FRAME_CHOICES = ["Whole plot first, else the photo holding the largest part",
+                 "Nadir tiers first, then coverage (earlier ranking)"]
 
 
 # --------------------------------------------------------------------------
@@ -882,13 +884,39 @@ def run_extraction(p, log, set_progress, cancel):
                 out.append([lon + dx / d * m / mlon, lat + dy / d * m / mlat])
             return out
 
+    # pixel source: the image files (JPEG/TIFF renditions, default) or the IIQ raw
+    # files developed by the Phase One SDK (IIQ plot extraction tab, iiq.py)
+    iiq_mode = (p.get('raw_source') or 'image').lower() == 'iiq'
+    iiq_dev = None
+    _exts = RAW_EXTS
+    if iiq_mode:
+        import iiq as _iiq
+        if not p.get('rawdir') or not os.path.isdir(p['rawdir']):
+            raise RuntimeError("IIQ extraction needs the folder with the .IIQ files.")
+        _iiq.assert_safe_output([p['rawdir']], p['outdir'])
+        os.makedirs(p['outdir'], exist_ok=True)
+        iiq_dev = _iiq.Developer(p.get('iiq_settings'),
+                                 os.path.join(p['outdir'], '_iiq_work'),
+                                 p.get('iiq_sdk', ''), log, parallel=2)
+        shutil.copy2(p['iiq_settings'], os.path.join(p['outdir'], 'IIQ_settings_used.json'))
+        with open(os.path.join(p['outdir'], 'IIQ_run.json'), 'w') as _f:
+            json.dump(dict(iiq_dir=p['rawdir'], settings=p['iiq_settings'],
+                           sdk_root=iiq_dev.sdk['root'],
+                           sdk_version=iiq_dev.sdk.get('version', '')), _f, indent=1)
+        _exts = _iiq.IIQ_EXTS
+        log(_iiq.CREDIT)
+        log("Pixel source: IIQ raw files developed by the Phase One ImageSDK  ("
+            + _iiq.sdk_status(p.get('iiq_sdk', ''))[1] + ")")
+        log(f"Development settings: {os.path.basename(p['iiq_settings'])} "
+            "(copy: IIQ_settings_used.json)")
+
     # raw image fallback index (basename and stem, lowercase)
     raw_index = {}
     if p.get('rawdir') and os.path.isdir(p['rawdir']):
         n = 0
         for root, _dirs, files in os.walk(p['rawdir']):
             for fn in files:
-                if os.path.splitext(fn)[1].lower() in RAW_EXTS:
+                if os.path.splitext(fn)[1].lower() in _exts:
                     full = os.path.join(root, fn)
                     raw_index.setdefault(fn.lower(), full)
                     raw_index.setdefault(os.path.splitext(fn)[0].lower(), full)
@@ -905,17 +933,42 @@ def run_extraction(p, log, set_progress, cancel):
         for key in (base, stem, cam.label.lower()):
             if key in raw_index:
                 return raw_index[key]
-        for e in RAW_EXTS:
+        for e in _exts:
             key = (cam.label + e).lower()
             if key in raw_index:
                 return raw_index[key]
+        if iiq_mode:
+            return None         # never fall back to the project's own renditions
         if os.path.exists(path):
             return path
         return None
 
+    if iiq_mode:
+        # The project may be aligned on renditions of another size (e.g. 0.3x
+        # TIFFs): scale every camera's pixel coordinates to the full IIQ frame.
+        _have = [c for c in cams if resolve_photo(c)]
+        if not _have:
+            raise RuntimeError("No .IIQ file in the IIQ folder matches the project's "
+                               "camera / photo names.")
+        log(f"IIQ files found for {len(_have)}/{len(cams)} aligned cameras")
+        iw, ih = iiq_dev.info(resolve_photo(_have[0]))
+        sw, sh = _have[0].sensor.width, _have[0].sensor.height
+        kx, ky = iw / float(sw), ih / float(sh)
+        if abs(kx - ky) > 0.01 * kx:
+            raise RuntimeError(f"IIQ frames are {iw}x{ih} but the project's images are "
+                               f"{sw}x{sh} (different shape) - rotated renditions?")
+        if abs(kx - 1.0) > 1e-3:
+            cams = [_iiq.ScaledCam(c, kx) for c in cams]
+            log(f"Project images {sw}x{sh}, IIQ frames {iw}x{ih}: camera pixel "
+                f"coordinates scaled x{kx:.4f}")
+
     do_raw = bool(p.get('do_raw', True))
     do_ortho = bool(p.get('do_ortho', False))
     raw_mode = (p.get('raw_mode') or 'auto').lower()   # auto|bbox|mask|rectify|native|best
+    # whole_first: a frame holding the WHOLE plot wins (most nadir / central of
+    # those); if none holds it all, the frame holding the largest part.
+    # tiered: the earlier ranking (nadir tiers first, coverage within the tier).
+    frame_choice = (p.get('frame_choice') or 'whole_first').lower()
     smart_seam = bool(p.get('smart_seam', True))       # min-error seam + feathering
     GAPFILL_N = max(2, int(p.get('gapfill_frames') or 8))   # candidates offered to fill
     mesh_step = max(16, int(p.get('mesh_step') or MESH_STEP_PX))
@@ -1047,14 +1100,18 @@ def run_extraction(p, log, set_progress, cancel):
         # QNAP TR-004 that holds these frames: 8 threads reading whole files reach
         # 109 MB/s, the same 8 threads letting PIL stream reach 2-5 MB/s. The blob
         # is transient (one per in-flight frame, ~150 MB) and is freed once decoded.
-        import io as _io
-        with open(path, 'rb', buffering=0) as _fh:
-            _blob = _fh.read()
-        im = Image.open(_io.BytesIO(_blob))
-        icc = im.info.get('icc_profile')          # grab before convert
-        if im.mode != 'RGB':
-            im = im.convert('RGB')
-        im.load()                                 # force full decode -> crop() is read-only
+        if iiq_dev is not None and path.lower().endswith(_iiq.IIQ_EXTS):
+            im = Image.fromarray(iiq_dev.develop(path), 'RGB')   # whole frame from IIQ
+            icc = None
+        else:
+            import io as _io
+            with open(path, 'rb', buffering=0) as _fh:
+                _blob = _fh.read()
+            im = Image.open(_io.BytesIO(_blob))
+            icc = im.info.get('icc_profile')          # grab before convert
+            if im.mode != 'RGB':
+                im = im.convert('RGB')
+            im.load()                                 # force full decode -> crop() is read-only
         with _img_lock:
             _img_lru[path] = (im, icc)
             _img_lru.move_to_end(path)
@@ -1112,6 +1169,10 @@ def run_extraction(p, log, set_progress, cancel):
         except Exception:
             pass
         tags['SOURCE_IMAGE'] = path
+        if iiq_dev is not None and path.lower().endswith(_iiq.IIQ_EXTS):
+            tags['PIXEL_SOURCE'] = ('IIQ developed by Phase One ImageSDK '
+                                    + (iiq_dev.sdk.get('version') or ''))
+            tags['IIQ_SETTINGS'] = os.path.basename(iiq_dev.settings)
         with _exif_lock:
             exif_cache[path] = tags
         return tags
@@ -1414,13 +1475,25 @@ def run_extraction(p, log, set_progress, cancel):
                 job['seam_y_pct'] = ''
                 crop = Image.fromarray(rgb, 'RGB')
             else:
-                im, icc = load_image(job['path'])
-                crop = im.crop((job['x0'], job['y0'], job['x1'], job['y1']))
+                if iiq_dev is not None and job['path'].lower().endswith(_iiq.IIQ_EXTS):
+                    # develop just this box from the IIQ (identical to developing
+                    # the whole frame and cropping, at a fraction of the time)
+                    icc = None
+                    bw, bh = job['x1'] - job['x0'], job['y1'] - job['y0']
+                    crop = Image.fromarray(iiq_dev.develop(
+                        job['path'], (job['x0'], job['y0'], bw, bh)), 'RGB')
+                    if crop.size != (bw, bh):
+                        raise RuntimeError(f"IIQ box came back {crop.size}, "
+                                           f"expected {(bw, bh)}")
+                else:
+                    im, icc = load_image(job['path'])
+                    crop = im.crop((job['x0'], job['y0'], job['x1'], job['y1']))
                 eff, plot_uv = job['eff'], job['plot_uv']
                 if eff == 'mask' and len(plot_uv) >= 3:
                     from PIL import ImageDraw
                     mk = Image.new('L', crop.size, 0)
-                    ImageDraw.Draw(mk).polygon([tuple(q) for q in plot_uv], fill=255)
+                    mpoly = job.get('mask_uv') or plot_uv
+                    ImageDraw.Draw(mk).polygon([tuple(q) for q in mpoly], fill=255)
                     crop = Image.composite(crop, Image.new('RGB', crop.size, (0, 0, 0)), mk)
                 elif eff == 'rectify' and len(plot_uv) == 4:
                     A, B, C, D = plot_uv
@@ -1542,7 +1615,8 @@ def run_extraction(p, log, set_progress, cancel):
                    frames_used='', seam_y_pct='',
                    fit_rows='', fit_width_m='', fit_length_m='', fit_area_m2='',
                    ortho_file='', ortho_covered_pct='', ortho_covered_m2='',
-                   source_path='', note='')
+                   source_path='', raw_style='', src_x0='', src_y0='', src_x1='',
+                   src_y1='', pixel_source='', note='')
         try:
             # ring -> WGS84; keep both the bare plot ring (coverage scoring) and
             # the margin-expanded ring (crop extent)
@@ -1585,6 +1659,13 @@ def run_extraction(p, log, set_progress, cancel):
                              [D[0] + u1[0] * pm, D[1] + u1[1] * pm]]
                 fit_probe_used = pm
             ring_w = expand_wgs(ring0, margin)
+            # rectangle a RECTIFIED crop is rendered onto: the margin ring, so a
+            # margin widens rectified crops the same way it widens native/masked
+            # ones (outer rows the grid clips are then whole in the crop).
+            # Coverage and plot area stay on the bare plot ring0.
+            ring_r = (ring_w if (margin > 0 and raw_mode in ('rectify', 'best')
+                                 and len(ring_w) == 4 and len(ring0) == 4)
+                      else ring0)
             lon0 = sum(q[0] for q in ring_w) / len(ring_w)
             lat0 = sum(q[1] for q in ring_w) / len(ring_w)
 
@@ -1615,9 +1696,9 @@ def run_extraction(p, log, set_progress, cancel):
 
                 def _gm(a, b):
                     return math.hypot((a[0] - b[0]) * mpx_g, (a[1] - b[1]) * mpy_g)
-                if len(ring0) == 4:
-                    egA = _gm(ring0[0], ring0[1]); egB = _gm(ring0[1], ring0[2])
-                    egC = _gm(ring0[2], ring0[3]); egD = _gm(ring0[3], ring0[0])
+                if len(ring_r) == 4:
+                    egA = _gm(ring_r[0], ring_r[1]); egB = _gm(ring_r[1], ring_r[2])
+                    egC = _gm(ring_r[2], ring_r[3]); egD = _gm(ring_r[3], ring_r[0])
                     gW = (egA + egC) / 2.0 or 1e-6       # width  (edges 0-1, 2-3)
                     gL = (egB + egD) / 2.0 or 1e-6       # length (edges 1-2, 3-0)
                 else:
@@ -1666,7 +1747,14 @@ def run_extraction(p, log, set_progress, cancel):
                     covq = frame_coverage([(uv.x, uv.y) for uv in uvs_p], w, h)
                     if covq <= 0.0:
                         continue                    # frame does not see the plot
-                    if raw_mode == 'best':
+                    if frame_choice == 'whole_first' and raw_mode != 'best':
+                        atier = (0 if aniso <= 1.06 else 1 if aniso <= 1.20 else
+                                 2 if aniso <= 1.50 else 3)
+                        if covq >= 0.999:
+                            key = (0, atier, -int(crop_clear), round(centre_dist, 4), over)
+                        else:
+                            key = (1, -round(covq, 4), atier, round(centre_dist, 4), over)
+                    elif raw_mode == 'best':
                         # one image per plot, no stitching: take the frame that
                         # holds the LARGEST part of the plot, then the most nadir
                         # / most centred of those.
@@ -1694,7 +1782,8 @@ def run_extraction(p, log, set_progress, cancel):
                         key = (tier, -round(covq, 4), -int(crop_clear),
                                round(centre_dist, 4), over)
                     cand.append((key, cam, uvs, uvs_p, w, h, inside, aniso, gsd, covq))
-                if cand and raw_mode not in ('best',) and not prefer_nadir:
+                if cand and raw_mode not in ('best',) and (
+                        not prefer_nadir or frame_choice == 'whole_first'):
                     # RESOLUTION demotion for the tiered native ranking: a frame
                     # can be low-distortion yet DISTANT (a turn/climb shot) -
                     # e.g. aniso 1.03 but half the px/metre of the best frame.
@@ -1707,8 +1796,11 @@ def run_extraction(p, log, set_progress, cancel):
                                 default=0) or \
                         max((c[8] for c in cand if c[9] >= 0.5), default=0)
                     if gbest > 0:
-                        cand = [((c[0][0] + (1 if c[8] < 0.7 * gbest else 0),)
-                                 + tuple(c[0][1:]),) + c[1:] for c in cand]
+                        # whole_first: demote within the whole/partial group only
+                        ki = 1 if frame_choice == 'whole_first' else 0
+                        cand = [(tuple(c[0][:ki])
+                                 + (c[0][ki] + (1 if c[8] < 0.7 * gbest else 0),)
+                                 + tuple(c[0][ki + 1:]),) + c[1:] for c in cand]
                 cand.sort(key=lambda c: c[0])
                 row['cand_frames'] = str(len(cand))
                 if cand:
@@ -1744,7 +1836,7 @@ def run_extraction(p, log, set_progress, cancel):
                         got = mesh_cache.get(key)
                         if got is None:
                             got = [to3d(lon, lat)[0]
-                                   for lon, lat in mesh_uv_nodes(ring0, nx, ny)]
+                                   for lon, lat in mesh_uv_nodes(ring_r, nx, ny)]
                             mesh_cache[key] = got
                         return got
 
@@ -1790,6 +1882,9 @@ def run_extraction(p, log, set_progress, cancel):
                         out = os.path.join(raw_dir, fn)
                         # plot polygon corners in crop-local pixel coords
                         plot_uv = [(uv.x - x0, uv.y - y0) for uv in uvs_p]
+                        # 'mask' keeps the plot PLUS its margin (the margin ring,
+                        # uvs); with no margin the two rings are the same
+                        mask_uv = [(uv.x - x0, uv.y - y0) for uv in uvs]
                         eff = raw_mode
                         if eff == 'auto':                       # straighten tilted plots only
                             eff = 'rectify' if _tilt_from_vertical(plot_uv) > 3.0 else 'mask'
@@ -1821,11 +1916,12 @@ def run_extraction(p, log, set_progress, cancel):
                             cw2, ch2 = x1 - x0, y1 - y0
                         gcps = []
                         if geotag:
-                            if rectified and len(ring0) == 4:
-                                # output rectangle corners map to the bare plot corners
+                            if rectified and len(ring_r) == 4:
+                                # output rectangle corners map to the corners of the
+                                # rendered ring (bare plot, or plot + margin)
                                 for (gx, gy), (lon, lat) in zip(
                                         [(0, 0), (0, ch2), (cw2, ch2), (cw2, 0)],
-                                        [ring0[0], ring0[3], ring0[2], ring0[1]]):
+                                        [ring_r[0], ring_r[3], ring_r[2], ring_r[1]]):
                                     _p3, zg = to3d(lon, lat)
                                     gcps.append((gy, gx, lon, lat, zg))
                             else:
@@ -1919,7 +2015,8 @@ def run_extraction(p, log, set_progress, cancel):
                         fit_across = ('x' if (not gW or not gL or gW <= gL)
                                       else 'y')
                         job = dict(pid=pid, path=path, x0=x0, y0=y0, x1=x1, y1=y1,
-                                   eff=eff, plot_uv=plot_uv, wpx=wpx, hpx=hpx,
+                                   eff=eff, plot_uv=plot_uv, mask_uv=mask_uv,
+                                   wpx=wpx, hpx=hpx,
                                    out=out, geotag=geotag, gcps=gcps, layers=layers,
                                    is_rank1=(rank == 1), row=row, cam_label=cam.label,
                                    cw=cw2, ch=ch2, full=False, cov=0.0, flag='',
@@ -1948,7 +2045,14 @@ def run_extraction(p, log, set_progress, cancel):
                                        corners_in_frame=f"{inside}/{len(uvs)}",
                                        raw_covered_pct=f"{cov:.1f}",
                                        raw_covered_m2=f"{plot_area * cov / 100:.3f}",
-                                       source_path=path)
+                                       source_path=path, raw_style=eff,
+                                       pixel_source=('iiq' if iiq_dev is not None
+                                                     else 'image'),
+                                       # source-frame box the crop was cut from
+                                       # (native/bbox/mask: crop pixel (0,0) =
+                                       # frame pixel (src_x0, src_y0)) - lets a
+                                       # crop be checked against its original
+                                       src_x0=x0, src_y0=y0, src_x1=x1, src_y1=y1)
                         fut = raw_pool.submit(_render, job)
                         fut.add_done_callback(_on_raw_done)
                         raw_futures.append(fut)
@@ -2013,6 +2117,8 @@ def run_extraction(p, log, set_progress, cancel):
                 row['crop_w'], row['crop_h'] = str(oim.width), str(oim.height)
                 row['raw_covered_pct'] = f"{100 - blk:.1f}"
                 row['source_path'] = opath
+                row['raw_style'] = 'ortho-fallback'
+                row['src_x0'] = row['src_y0'] = row['src_x1'] = row['src_y1'] = ''
                 row['note'] = ("ortho-fallback: field-edge, no near-nadir raw frame; "
                                "rebuilt from orthomosaic crop, auto-fit rows "
                                "(nodata=black)")
@@ -2055,6 +2161,11 @@ def run_extraction(p, log, set_progress, cancel):
         + (f", ortho crops {ok_ortho}/{len(plots)}" if do_ortho else "")
         + f"  ->  {p['outdir']}")
     log(f"Manifest: {mpath}")
+    if iiq_dev is not None:
+        n_used, changed = iiq_dev.used_unchanged()
+        log(f"Source check: {n_used - len(changed)}/{n_used} IIQ files used are unchanged"
+            + (f"  [!] CHANGED: {changed[:5]}" if changed else ""))
+        iiq_dev.cleanup()
     return p['outdir']
 
 
@@ -2062,6 +2173,51 @@ _GCP_TR = {}
 
 
 _GCP_EPSG = [None]          # set per run from the 'gcp_epsg' parameter
+DEFAULT_EPSG = '7850'       # GDA2020 / MGA zone 50: default CRS of every output
+
+
+def prj_wkt_for_epsg(epsg):
+    """.prj text for an EPSG code (ESRI WKT1 when it round-trips, else WKT)."""
+    from rasterio.crs import CRS
+    c = CRS.from_epsg(int(epsg))
+    try:
+        esri = c.to_wkt(version="WKT1_ESRI")
+        if esri and CRS.from_wkt(esri) == c:
+            return esri
+    except Exception:
+        pass
+    return c.to_wkt()
+
+
+def epsg_from_ortho(crs, lonlat):
+    """Output EPSG following an orthomosaic's CRS: its own code when projected; for a
+    lon/lat ortho the local MGA2020 zone in Australia (GDA2020 / MGA, e.g. 7850 at
+    York), else the WGS 84 UTM zone. None if it cannot be decided."""
+    try:
+        if crs is None:
+            return None
+        if not crs.is_geographic:
+            return crs.to_epsg()
+        lon, lat = lonlat
+        zone = int((lon + 180.0) // 6) + 1
+        if -45 <= lat <= -9 and 108 <= lon <= 160 and 49 <= zone <= 56:
+            return 7800 + zone
+        return (32700 if lat < 0 else 32600) + zone
+    except Exception:
+        return None
+
+
+def reproject_rings(rings, src_crs, dst_epsg):
+    """Rings [[x, y], ...] from src_crs (WKT / EPSG / rasterio CRS) to EPSG:dst_epsg."""
+    from rasterio.crs import CRS
+    from rasterio.warp import transform
+    src = src_crs if isinstance(src_crs, CRS) else CRS.from_user_input(src_crs)
+    out = []
+    for r in rings:
+        xs, ys = transform(src, CRS.from_epsg(int(dst_epsg)), [p[0] for p in r],
+                           [p[1] for p in r])
+        out.append([[x, y] for x, y in zip(xs, ys)])
+    return out
 
 
 def _gcp_target():
@@ -2671,10 +2827,22 @@ def make_tiled_ortho(src_path, dst_path, log, set_progress, cancel):
 # Interactive plot editor (resize / reshape before extraction)
 # --------------------------------------------------------------------------
 def open_plot_editor(parent, plots_path, on_saved, log=lambda *_: None):
+    """The plot editor in its own window (see build_plot_editor)."""
+    return build_plot_editor(parent, plots_path, on_saved, log, embedded=False)
+
+
+def build_plot_editor(parent, plots_path, on_saved, log=lambda *_: None,
+                      embedded=False, basemap='', out_epsg=None, on_crs=None):
     """Interactive editor: wheel-zoom, pan (Space/middle-mouse/buttons), multi-
     select (click, Shift/Ctrl-click, rubber-band, Select all), move plots by
     dragging, reshape via corner handles, uniform grow/shrink, optional ortho
-    basemap. Saves <name>_edited.shp and calls on_saved(new_path)."""
+    basemap. Saves <name>_edited.shp and calls on_saved(new_path).
+
+    embedded=True builds it into `parent` (the Edit plot grid tab) and returns the
+    frame; otherwise it opens a Toplevel. `basemap` = an RGB orthomosaic GeoTIFF
+    loaded straight away. `out_epsg` = a callable giving the EPSG code the edited
+    grid is saved in (reprojected from the input's CRS); None keeps the input CRS. The returned widget carries .api (the editing actions,
+    used by the self-test)."""
     import tkinter as tk
     from tkinter import ttk, messagebox, filedialog
     try:
@@ -2702,9 +2870,12 @@ def open_plot_editor(parent, plots_path, on_saved, log=lambda *_: None):
         mpx = mpy = 1.0
     k = mpy / mpx
 
-    win = tk.Toplevel(parent)
-    win.title("Edit plots — zoom · pan · select · move · reshape · width/length/shift")
-    win.geometry("1320x860")
+    if embedded:
+        win = ttk.Frame(parent)
+    else:
+        win = tk.Toplevel(parent)
+        win.title("Edit plots — zoom · pan · select · move · reshape · width/length/shift")
+        win.geometry("1320x860")
     bar = ttk.Frame(win, padding=5)
     bar.pack(fill='x')
     cv = tk.Canvas(win, bg='#181818', highlightthickness=0)
@@ -2767,10 +2938,14 @@ def open_plot_editor(parent, plots_path, on_saved, log=lambda *_: None):
         ys = [p[1] for r in rings for p in r]
         return min(xs), min(ys), max(xs), max(ys)
 
+    fitted = {'v': False}
+
     def fit():
         x0, y0, x1, y1 = bounds()
-        w = cv.winfo_width() or 1100
-        h = cv.winfo_height() or 660
+        w, h = cv.winfo_width(), cv.winfo_height()
+        fitted['v'] = w > 50 and h > 50       # a hidden tab's canvas is 1x1 px
+        if not fitted['v']:
+            w, h = 1100, 660
         pad = 50
         T['scale'] = min((w - 2 * pad) / max(x1 - x0, 1e-9),
                          (h - 2 * pad) / max((y1 - y0) * k, 1e-9))
@@ -3144,10 +3319,12 @@ def open_plot_editor(parent, plots_path, on_saved, log=lambda *_: None):
         sel.clear()
         redraw()
 
-    def load_basemap():
-        pth = filedialog.askopenfilename(
-            title="Ortho basemap (georeferenced GeoTIFF; any CRS - reprojected to the plots)",
-            filetypes=[("GeoTIFF", "*.tif *.tiff")])
+    def load_basemap(pth=None):
+        if not pth:
+            pth = filedialog.askopenfilename(
+                title="Ortho basemap (georeferenced RGB GeoTIFF; any CRS - reprojected "
+                      "to the plots)",
+                filetypes=[("GeoTIFF", "*.tif *.tiff")])
         if not pth:
             return
         try:
@@ -3236,12 +3413,21 @@ def open_plot_editor(parent, plots_path, on_saved, log=lambda *_: None):
             bm['key'] = None
             log(f"Basemap loaded: {os.path.basename(pth)} ({ow}x{oh} px, "
                 f"{100.0 * valid.mean():.0f}% valid data in the plot window)")
+            bm['path'] = pth
+            if on_crs is not None and src_crs is not None:
+                try:
+                    from rasterio.warp import transform as _tf
+                    _lo, _la = _tf(src_crs, 'EPSG:4326', [(L + R) / 2.0], [(B + Tp) / 2.0])                         if plot_crs is None else _tf(plot_crs, 'EPSG:4326',
+                                                     [(L + R) / 2.0], [(B + Tp) / 2.0])
+                    on_crs(src_crs, (_lo[0], _la[0]))
+                except Exception as _e:
+                    log(f"[!] could not take the output CRS from the ortho: {_e}")
             redraw()
         except Exception as e:
             log("Basemap error: " + traceback.format_exc(limit=3))
             messagebox.showerror("Basemap", f"Could not load basemap:\n{e}")
 
-    def save():
+    def save(quiet=False):
         import shapefile
         import shutil
         base = os.path.splitext(plots_path)[0]
@@ -3256,7 +3442,19 @@ def open_plot_editor(parent, plots_path, on_saved, log=lambda *_: None):
                 recs = list(rdr.records())
             except Exception:
                 w.field('Plot_ID', 'C', 40)
-            for i, r in enumerate(rings):
+            # output CRS: the chosen EPSG (reprojected), else the input's own
+            dst = str((out_epsg() if callable(out_epsg) else out_epsg) or '').strip()
+            src_crs = _crs or ('EPSG:4326' if geographic else None)
+            wr, prj_txt = rings, None
+            if dst.isdigit() and src_crs:
+                from rasterio.crs import CRS as _C
+                if _C.from_user_input(src_crs) != _C.from_epsg(int(dst)):
+                    wr = reproject_rings(rings, src_crs, dst)
+                prj_txt = prj_wkt_for_epsg(dst)
+            elif dst:
+                log(f"[!] output CRS '{dst}' not used (input CRS unknown or not an "
+                    "EPSG number) - saved in the input's CRS")
+            for i, r in enumerate(wr):
                 w.poly([[list(p) for p in (r + [r[0]])]])
                 if recs is not None and i < len(recs):
                     w.record(*recs[i])
@@ -3264,36 +3462,53 @@ def open_plot_editor(parent, plots_path, on_saved, log=lambda *_: None):
                     w.record(ids[i])
             w.close()
             prj = base + '.prj'
-            if os.path.exists(prj):
+            if prj_txt:
+                with open(outp[:-4] + '.prj', 'w') as _f:
+                    _f.write(prj_txt)
+            elif os.path.exists(prj):
                 shutil.copyfile(prj, outp[:-4] + '.prj')
         except Exception as e:
             messagebox.showerror("Edit plots", f"Could not save:\n{e}")
             return
-        log(f"Edited plots saved: {outp}")
+        log(f"Edited plots saved: {outp}"
+            + (f"  (EPSG:{dst})" if prj_txt else "  (input CRS)"))
         on_saved(outp)
-        messagebox.showinfo("Edit plots",
-                            f"Saved adjusted plots:\n{outp}\n\n"
-                            "The extractor will now use this edited file.")
-        win.destroy()
+        if not quiet:
+            messagebox.showinfo("Edit plots",
+                                f"Saved adjusted plots:\n{outp}\n\n"
+                                "Tabs 4 and 5 will now use this edited grid.")
+        if not embedded:
+            win.destroy()
+        return outp
 
-    # ---- toolbar (each tool shows its keyboard shortcut underneath) ----
+    # ---- toolbar (each tool shows its keyboard shortcut underneath), in two rows
+    # so it fits a tab as well as the wide window ----
+    rows_ = [ttk.Frame(bar), ttk.Frame(bar)]
+    for _rf in rows_:
+        _rf.pack(side='top', fill='x', pady=(0, 2))
+    tb = {'f': rows_[0]}
+
     def tool(label, short, cmd, w=11):
-        f = ttk.Frame(bar)
+        f = ttk.Frame(tb['f'])
         f.pack(side='left', padx=3)
         ttk.Button(f, text=label, command=cmd, width=w).pack()
         ttk.Label(f, text=short, foreground='#888', font=('Segoe UI', 7)).pack()
 
     tool("Select all", "Ctrl+A", select_all)
     tool("Clear", "Esc", clear_sel, w=7)
-    pf = ttk.Frame(bar)
+    pf = ttk.Frame(tb['f'])
     pf.pack(side='left', padx=3)
     ttk.Checkbutton(pf, text="Pan mode", variable=pan_mode).pack()
     ttk.Label(pf, text="Space / MMB", foreground='#888', font=('Segoe UI', 7)).pack()
     tool("Zoom in", "wheel up", lambda: zoom_at(cv.winfo_width() / 2, cv.winfo_height() / 2, 1.2), w=8)
     tool("Zoom out", "wheel down", lambda: zoom_at(cv.winfo_width() / 2, cv.winfo_height() / 2, 1 / 1.2), w=8)
     tool("Fit", "F", lambda: (fit(), redraw()), w=5)
-    sf = ttk.Frame(bar)
-    sf.pack(side='left', padx=(10, 3))
+    tool("Basemap", "RGB ortho .tif", load_basemap, w=9)
+    tool("Reset all", "Ctrl+Z", reset_all, w=9)
+    tool("Save & use", "S", save, w=10)
+    tb['f'] = rows_[1]
+    sf = ttk.Frame(tb['f'])
+    sf.pack(side='left', padx=(3, 3))
     rowf = ttk.Frame(sf)
     rowf.pack()
     ttk.Label(rowf, text="Step m:").pack(side='left')
@@ -3310,11 +3525,12 @@ def open_plot_editor(parent, plots_path, on_saved, log=lambda *_: None):
     tool("Shift ►", "Shift+→", lambda: do_shift('width', _step()), w=6)
     tool("Shift ▲", "Shift+↑", lambda: do_shift('length', _step()), w=6)
     tool("Shift ▼", "Shift+↓", lambda: do_shift('length', -_step()), w=6)
-    tool("Basemap", "ortho .tif", load_basemap, w=9)
-    tool("Reset all", "Ctrl+Z", reset_all, w=9)
-    tool("Save & use", "S", save, w=10)
 
     # ---- bindings ----
+    kb = cv if embedded else win
+    if embedded:
+        cv.configure(takefocus=1)
+        cv.bind('<Enter>', lambda e: cv.focus_set())
     cv.bind('<ButtonPress-1>', on_press)
     cv.bind('<B1-Motion>', on_motion)
     cv.bind('<ButtonRelease-1>', on_release)
@@ -3322,34 +3538,45 @@ def open_plot_editor(parent, plots_path, on_saved, log=lambda *_: None):
     cv.bind('<B2-Motion>', on_mmb_move)
     cv.bind('<ButtonRelease-2>', on_mmb_up)
     cv.bind('<MouseWheel>', on_wheel)
-    win.bind('<Control-a>', lambda e: select_all())
-    win.bind('<Control-A>', lambda e: select_all())
-    win.bind('<Escape>', lambda e: clear_sel())
-    win.bind('<Control-z>', lambda e: reset_all())
-    win.bind('<KeyPress-space>', lambda e: space_held.__setitem__('v', True))
-    win.bind('<KeyRelease-space>', lambda e: space_held.__setitem__('v', False))
+    kb.bind('<Control-a>', lambda e: select_all())
+    kb.bind('<Control-A>', lambda e: select_all())
+    kb.bind('<Escape>', lambda e: clear_sel())
+    kb.bind('<Control-z>', lambda e: reset_all())
+    kb.bind('<KeyPress-space>', lambda e: space_held.__setitem__('v', True))
+    kb.bind('<KeyRelease-space>', lambda e: space_held.__setitem__('v', False))
     for kk in ('<KeyPress-f>', '<KeyPress-F>'):
-        win.bind(kk, lambda e: (fit(), redraw()))
+        kb.bind(kk, lambda e: (fit(), redraw()))
     for kk in ('<KeyPress-s>', '<KeyPress-S>'):
-        win.bind(kk, lambda e: save())
+        kb.bind(kk, lambda e: save())
     for kk in ('+', '=', '<KP_Add>'):
-        win.bind(kk, lambda e: do_buffer(_step()))
+        kb.bind(kk, lambda e: do_buffer(_step()))
     for kk in ('-', '<KP_Subtract>'):
-        win.bind(kk, lambda e: do_buffer(-_step()))
-    win.bind(']', lambda e: do_axis('width', _step()))       # width wider
-    win.bind('[', lambda e: do_axis('width', -_step()))      # width narrower
-    win.bind("'", lambda e: do_axis('length', _step()))      # length longer
-    win.bind(';', lambda e: do_axis('length', -_step()))     # length shorter
-    win.bind('<Shift-Left>', lambda e: do_shift('width', -_step()))    # slide onto rows
-    win.bind('<Shift-Right>', lambda e: do_shift('width', _step()))
-    win.bind('<Shift-Up>', lambda e: do_shift('length', _step()))
-    win.bind('<Shift-Down>', lambda e: do_shift('length', -_step()))
-    win.bind('<Left>', lambda e: pan_by(60, 0))
-    win.bind('<Right>', lambda e: pan_by(-60, 0))
-    win.bind('<Up>', lambda e: pan_by(0, 60))
-    win.bind('<Down>', lambda e: pan_by(0, -60))
-    cv.bind('<Configure>', lambda e: redraw())
+        kb.bind(kk, lambda e: do_buffer(-_step()))
+    kb.bind(']', lambda e: do_axis('width', _step()))       # width wider
+    kb.bind('[', lambda e: do_axis('width', -_step()))      # width narrower
+    kb.bind("'", lambda e: do_axis('length', _step()))      # length longer
+    kb.bind(';', lambda e: do_axis('length', -_step()))     # length shorter
+    kb.bind('<Shift-Left>', lambda e: do_shift('width', -_step()))    # slide onto rows
+    kb.bind('<Shift-Right>', lambda e: do_shift('width', _step()))
+    kb.bind('<Shift-Up>', lambda e: do_shift('length', _step()))
+    kb.bind('<Shift-Down>', lambda e: do_shift('length', -_step()))
+    kb.bind('<Left>', lambda e: pan_by(60, 0))
+    kb.bind('<Right>', lambda e: pan_by(-60, 0))
+    kb.bind('<Up>', lambda e: pan_by(0, 60))
+    kb.bind('<Down>', lambda e: pan_by(0, -60))
+    def on_configure(e):
+        # first time the canvas gets a real size (e.g. the tab is shown): fit the view
+        if not fitted['v'] and e.width > 50 and e.height > 50:
+            fit()
+        redraw()
+    cv.bind('<Configure>', on_configure)
     win.after(80, lambda: (fit(), redraw()))
+    if basemap and os.path.exists(basemap):
+        win.after(150, lambda: load_basemap(basemap))
+    win.api = dict(select_all=select_all, clear=clear_sel, buffer=do_buffer, axis=do_axis,
+                   shift=do_shift, reset=reset_all, save=save, load_basemap=load_basemap,
+                   rings=rings, sel=sel, wl=_wl, basemap=bm)
+    return win
 
 
 # --------------------------------------------------------------------------
@@ -3369,8 +3596,8 @@ def main():
 
     root = tk.Tk()
     root.title("Plot Extractor — raw image per plot")
-    root.geometry("860x720")
-    root.minsize(760, 620)
+    root.geometry("1100x780")
+    root.minsize(980, 640)
 
     # ---- header banner with partner logos (DPIRD left, APPN right) --------
     def _asset(name):
@@ -3402,16 +3629,24 @@ def main():
     except Exception:
         pass    # logos are cosmetic — never block the app
 
-    # Tabs: the extractor form, and the plot-grid designer that builds the
-    # shapefile the extractor consumes (ortho basemap, no Metashape needed).
+    # Tabs, numbered in workflow order. The plot grid made in tab 1 or edited in
+    # tab 2 is the "current grid": tabs 4 and 5 use it by default, and either can
+    # still be pointed at another plots file.
     nb = ttk.Notebook(root)
     nb.pack(fill='both', expand=True)
-    tab_extract = ttk.Frame(nb)
     tab_grid = ttk.Frame(nb)
+    tab_edit = ttk.Frame(nb)
+    tab_iiqc = ttk.Frame(nb)
+    tab_extract = ttk.Frame(nb)
+    tab_iiqx = ttk.Frame(nb)
     tab_tiles = ttk.Frame(nb)
-    nb.add(tab_extract, text="  Extract plots  ")
-    nb.add(tab_grid, text="  Generate plot grid  ")
-    nb.add(tab_tiles, text="  Training tiles  ")
+    tab_qa = ttk.Frame(nb)
+    tab_ack = ttk.Frame(nb)
+    for _t, _name in ((tab_grid, "1  Generate plot grid"), (tab_edit, "2  Edit plot grid"),
+                      (tab_iiqc, "3  IIQ conversion"), (tab_extract, "4  Extract plots"),
+                      (tab_iiqx, "5  IIQ plot extraction"), (tab_tiles, "6  Training tiles"),
+                      (tab_qa, "7  QA"), (tab_ack, "8  Acknowledgements")):
+        nb.add(_t, text=f" {_name} ")
 
     frm = ttk.Frame(tab_extract, padding=10)
     frm.pack(fill='both', expand=True)
@@ -3432,11 +3667,13 @@ def main():
         'quality': tk.StringVar(value=str(cfg.get('quality', 92))),
         'do_raw': tk.BooleanVar(value=cfg.get('do_raw', True)),
         'raw_mode': tk.StringVar(value=cfg.get('raw_mode', 'Native (no resample, no black)')),
+        'frame_choice': tk.StringVar(value=cfg.get('frame_choice', FRAME_CHOICES[0])),
         'engine': tk.StringVar(value=cfg.get('engine', 'Metashape API')),
         'dem_tif': tk.StringVar(value=cfg.get('dem_tif', '')),
         'do_ortho': tk.BooleanVar(value=cfg.get('do_ortho', False)),
         'crs_override': tk.StringVar(value=cfg.get('crs_override', 'auto')),
-        'gcp_epsg': tk.StringVar(value=str(cfg.get('gcp_epsg', ''))),
+        'gcp_epsg': tk.StringVar(value=str(cfg.get('gcp_epsg') or DEFAULT_EPSG)),
+        'grid_epsg': tk.StringVar(value=str(cfg.get('grid_epsg') or DEFAULT_EPSG)),
         'format': tk.StringVar(value=cfg.get('format', 'TIFF (lossless)')),
         'to_srgb': tk.BooleanVar(value=cfg.get('to_srgb', False)),
         'workers': tk.StringVar(value=str(cfg.get('workers', 0))),
@@ -3446,7 +3683,13 @@ def main():
         'smart_seam': tk.BooleanVar(value=cfg.get('smart_seam', True)),
         'seam_map': tk.BooleanVar(value=cfg.get('seam_map', False)),
         'mesh_step': tk.StringVar(value=str(cfg.get('mesh_step', MESH_STEP_PX))),
+        # the grid made in tab 1 / edited in tab 2, and tab 2's basemap
+        'current_grid': tk.StringVar(value=cfg.get('current_grid', '')),
+        'edit_basemap': tk.StringVar(value=cfg.get('edit_basemap', '')),
+        'edit_rows': tk.StringVar(value=str(cfg.get('edit_rows', 0))),
     }
+    if not vars_['plots'].get() and vars_['current_grid'].get():
+        vars_['plots'].set(vars_['current_grid'].get())
 
     r = 0
     def add_path_row(label, var, kind, filetypes=None, hint=None):
@@ -3505,8 +3748,10 @@ def main():
                           [("GeoTIFF", "*.tif *.tiff")],
                           hint="Ortho-only mode: crops plots straight from this raster, "
                                "no Metashape / license needed")
-    add_path_row("Plot boundaries (.shp / .geojson) *", vars_['plots'], 'file',
-                 [("Plot boundaries", "*.shp *.geojson *.json")])
+    add_path_row("Plot grid (.shp / .geojson) *", vars_['plots'], 'file',
+                 [("Plot boundaries", "*.shp *.geojson *.json")],
+                 hint="Default: the grid made in tab 1 or edited in tab 2. "
+                      "Browse to extract with another plots file.")
 
     idrow = ttk.Frame(frm)
     idrow.grid(row=r, column=1, sticky='w', padx=6)
@@ -3526,10 +3771,10 @@ def main():
     # up half in 4326 and half in 7850. Coordinates are transformed, not relabelled.
     crsrow = ttk.Frame(frm)
     crsrow.grid(row=r, column=1, sticky='w', padx=6)
-    ttk.Label(frm, text="Output GCP CRS").grid(row=r, column=0, sticky='w', pady=3)
+    ttk.Label(frm, text="Output CRS (EPSG)").grid(row=r, column=0, sticky='w', pady=3)
     ttk.Entry(crsrow, textvariable=vars_['gcp_epsg'], width=10).pack(side='left')
-    ttk.Label(crsrow, text="EPSG code for the GeoTIFF ground control points "
-                           "(blank = 4326). Set it once for the whole project.",
+    ttk.Label(crsrow, text="default 7850 = GDA2020 / MGA zone 50; any EPSG code "
+                           "(e.g. 7851 for zone 51, 4326 for WGS 84)",
               foreground='grey').pack(side='left', padx=4)
     r += 1
 
@@ -3570,6 +3815,12 @@ def main():
     checks = ttk.Frame(frm)
     checks.grid(row=r, column=0, columnspan=3, sticky='w')
     r += 1
+    fc_row = ttk.Frame(frm)
+    fc_row.grid(row=r, column=0, columnspan=3, sticky='w', pady=(2, 0))
+    r += 1
+    ttk.Label(fc_row, text="frame per plot:").pack(side='left', padx=(22, 3))
+    ttk.Combobox(fc_row, textvariable=vars_['frame_choice'], width=58, state='readonly',
+                 values=FRAME_CHOICES).pack(side='left')
     raw_chk = ttk.Checkbutton(checks, text="Raw image crop per plot",
                               variable=vars_['do_raw'])
     raw_chk.pack(side='left', padx=(0, 6))
@@ -3673,12 +3924,8 @@ def main():
     cancel_btn.pack(side='left', padx=8)
     open_btn = ttk.Button(btns, text="Open output folder", state='disabled')
     open_btn.pack(side='left', padx=8)
-    edit_btn = ttk.Button(btns, text="Edit plots…")
-    edit_btn.pack(side='left', padx=8)
     tile_btn = ttk.Button(btns, text="Make tiled copy")
     tile_btn.pack(side='left', padx=8)
-    fixgrid_btn = ttk.Button(btns, text="Correct grid to rows…")
-    fixgrid_btn.pack(side='left', padx=8)
     setcrs_btn = ttk.Button(btns, text="Set CRS of existing crops…")
     setcrs_btn.pack(side='left', padx=8)
     prog = ttk.Progressbar(btns, mode='determinate')
@@ -3792,6 +4039,8 @@ def main():
                                         "Rectified rectangle": "rectify",
                                         "Best single frame (no stitching)": "best"}.get(
                                             vars_['raw_mode'].get(), "native"),
+                              frame_choice=('tiered' if vars_['frame_choice'].get()
+                                            == FRAME_CHOICES[1] else 'whole_first'),
                               smart_seam=vars_['smart_seam'].get(),
                               seam_map=vars_['seam_map'].get(),
                               mesh_step=int(vars_['mesh_step'].get() or 96),
@@ -3830,14 +4079,6 @@ def main():
     def on_open():
         if state['outdir'] and os.path.isdir(state['outdir']):
             os.startfile(state['outdir'])
-
-    def on_edit_plots():
-        pth = vars_['plots'].get().strip()
-        if not (pth and os.path.exists(pth)):
-            messagebox.showerror("Plot Extractor",
-                                 "Select a plot boundary file first.")
-            return
-        open_plot_editor(root, pth, lambda new: vars_['plots'].set(new), log)
 
     def on_make_tiled():
         if state['running']:
@@ -3879,28 +4120,27 @@ def main():
         boundary leaves no signature in the imagery and 'centring on the rows'
         would just be moving polygons on detection noise.
         """
-        shp = vars_['plots'].get().strip()
-        if not shp:
-            messagebox.showwarning("Correct grid",
-                                   "Choose the plot boundaries first.")
+        shp = ed_grid.get().strip()
+        if not (shp and os.path.exists(shp)):
+            messagebox.showwarning("Correct grid", "Choose the plot grid first.")
             return
-        ortho = vars_['ortho_tif'].get().strip()
+        ortho = vars_['edit_basemap'].get().strip()
         if not ortho or not os.path.exists(ortho):
             ortho = filedialog.askopenfilename(
-                title="Orthomosaic covering the trial",
+                title="RGB orthomosaic covering the trial",
                 filetypes=[("GeoTIFF", "*.tif *.tiff"), ("All files", "*.*")])
             if not ortho:
                 return
-            vars_['ortho_tif'].set(ortho)
+            vars_['edit_basemap'].set(ortho)
         try:
-            rows = int(vars_['rows_per_plot'].get() or 0)
+            rows = int(vars_['edit_rows'].get() or 0)
         except (TypeError, ValueError):
             rows = 0
         out = os.path.splitext(shp)[0] + "_refit.shp"
         fixgrid_btn.configure(state='disabled')
-        log("")
-        log("Correcting the plot grid against the orthomosaic — this reads the "
-            "whole trial, allow a few minutes.")
+        ed_log("")
+        ed_log("Correcting the plot grid against the orthomosaic — this reads the "
+               "whole trial, allow a few minutes.")
 
         def work():
             import io as _io, contextlib as _ctx
@@ -3915,7 +4155,7 @@ def main():
             except Exception as e:
                 buf.write("[!] grid correction failed: " + str(e))
             for line in buf.getvalue().splitlines():
-                msg_q.put(('log', line))
+                msg_q.put(('edlog', line))
             msg_q.put(('gridfix', (code, out)))
 
         threading.Thread(target=work, daemon=True).start()
@@ -3950,9 +4190,7 @@ def main():
 
         threading.Thread(target=work, daemon=True).start()
 
-    edit_btn.configure(command=on_edit_plots)
     tile_btn.configure(command=on_make_tiled)
-    fixgrid_btn.configure(command=on_fix_grid)
     setcrs_btn.configure(command=on_set_crs)
 
     NL = chr(10)          # newline for message-box text, kept out of literals
@@ -3961,7 +4199,12 @@ def main():
         try:
             while True:
                 kind, payload = msg_q.get_nowait()
-                if kind == 'log':
+                if kind == 'edlog':
+                    ed_logbox.configure(state='normal')
+                    ed_logbox.insert('end', payload + "\n")
+                    ed_logbox.see('end')
+                    ed_logbox.configure(state='disabled')
+                elif kind == 'log':
                     logbox.configure(state='normal')
                     logbox.insert('end', payload + "\n")
                     logbox.see('end')
@@ -3987,11 +4230,10 @@ def main():
                                 "Grid corrected",
                                 "A corrected grid was written to:" + NL + NL
                                 + path + NL + NL
-                                + "Use it for the extraction?"):
-                            vars_['plots'].set(path)
-                            log(f"Plot boundaries set to the corrected grid: {path}")
-                            log("With the grid corrected, leave 'Auto-fit to rows' OFF "
-                                "— the polygon is now the plot.")
+                                + "Use it as the current grid (tabs 4 and 5)?"):
+                            set_grid(path, "corrected grid")
+                            ed_log("With the grid corrected, leave 'Auto-fit to rows' OFF "
+                                   "in tab 4 — the polygon is now the plot.")
                     elif code == 3:
                         messagebox.showinfo(
                             "Grid not changed",
@@ -4022,19 +4264,43 @@ def main():
         cancel_ev.set()
         root.destroy()
 
+    def follow_ortho_crs(crs, lonlat):
+        """An orthomosaic was loaded in tab 1 or 2: every output CRS field (grids of
+        tabs 1-2, images of tabs 3-5) follows it; the user can still type another."""
+        e = epsg_from_ortho(crs, lonlat)
+        if not e:
+            return
+        e = str(e)
+        fields = [vars_['grid_epsg'], vars_['gcp_epsg']]
+        for t in (tab_iiqc, tab_iiqx):
+            try:
+                fields.append(t.winfo_children()[0].V['epsg'])
+            except Exception:
+                pass
+        changed = [f for f in fields if f.get().strip() != e]
+        for f in changed:
+            f.set(e)
+        if changed:
+            msg = (f"Output CRS set to EPSG:{e} from the orthomosaic "
+                   f"({crs.to_string() if hasattr(crs, 'to_string') else crs}); "
+                   "change it in any tab if needed")
+            log(msg)
+            ed_log(msg)
+
     # ---- "Generate plot grid" tab -----------------------------------------
     # Builds the plot shapefile by clicking the 4 trial corners on an
     # orthomosaic; "Save & use" feeds it straight back into the form above.
     def _use_grid(path):
-        vars_['plots'].set(path)
-        log(f"Plot boundaries set to the new grid: {path}")
-        nb.select(tab_extract)
+        set_grid(path, "new grid from tab 1")
+        nb.select(tab_edit)
 
     try:
         from grid_designer import build_grid_designer
         gd = build_grid_designer(tab_grid, on_saved=_use_grid, log=log,
                                  ortho_path=vars_['ortho_tif'].get().strip(),
-                                 crs_hint=vars_['crs_override'].get().strip())
+                                 crs_hint=vars_['crs_override'].get().strip(),
+                                 out_epsg_var=vars_['grid_epsg'],
+                                 on_crs=follow_ortho_crs)
         gd.pack(fill='both', expand=True)
     except Exception as e:
         msg = ("The plot-grid designer could not be loaded:\n\n"
@@ -4042,6 +4308,105 @@ def main():
                "to the application.")
         ttk.Label(tab_grid, text=msg, justify='left', padding=20,
                   foreground='#a00').pack(anchor='nw')
+
+    # ---- tab 2: "Edit plot grid" -------------------------------------------
+    # The plot editor (move / reshape / width / length / shift / grow) on the RGB
+    # orthomosaic, plus "Correct grid to rows". Saves <grid>_edited.shp (or
+    # _refit.shp) beside the input, which is never changed, and makes it the current grid.
+    ed_grid = tk.StringVar(value=vars_['current_grid'].get() or vars_['plots'].get())
+    if not vars_['edit_basemap'].get() and vars_['ortho_tif'].get():
+        vars_['edit_basemap'].set(vars_['ortho_tif'].get())
+    ed_top = ttk.Frame(tab_edit, padding=(8, 6, 8, 0))
+    ed_top.pack(fill='x')
+    ed_top.columnconfigure(1, weight=1)
+
+    def _ed_browse(var, title, types):
+        v = filedialog.askopenfilename(title=title, filetypes=types)
+        if v:
+            var.set(os.path.normpath(v))
+    ttk.Label(ed_top, text="Plot grid *").grid(row=0, column=0, sticky='w', pady=2)
+    ttk.Entry(ed_top, textvariable=ed_grid).grid(row=0, column=1, sticky='ew', padx=6)
+    ttk.Button(ed_top, text="Browse...", command=lambda: _ed_browse(
+        ed_grid, "Plot grid to edit", [("Plot boundaries", "*.shp *.geojson *.json")])
+    ).grid(row=0, column=2)
+    ed_load_btn = ttk.Button(ed_top, text="Load grid")
+    ed_load_btn.grid(row=0, column=3, padx=(6, 0))
+    ttk.Label(ed_top, text="RGB orthomosaic").grid(row=1, column=0, sticky='w', pady=2)
+    ttk.Entry(ed_top, textvariable=vars_['edit_basemap']).grid(row=1, column=1, sticky='ew',
+                                                              padx=6)
+    ttk.Button(ed_top, text="Browse...", command=lambda: _ed_browse(
+        vars_['edit_basemap'], "RGB orthomosaic GeoTIFF (basemap)",
+        [("GeoTIFF", "*.tif *.tiff")])).grid(row=1, column=2)
+    ed_fix = ttk.Frame(ed_top)
+    ed_fix.grid(row=2, column=1, columnspan=3, sticky='w', padx=6, pady=(2, 0))
+    fixgrid_btn = ttk.Button(ed_fix, text="Correct grid to rows…")
+    fixgrid_btn.pack(side='left')
+    ttk.Label(ed_fix, text="  sown rows per plot:").pack(side='left')
+    ttk.Spinbox(ed_fix, from_=0, to=60, width=4,
+                textvariable=vars_['edit_rows']).pack(side='left')
+    ttk.Label(ed_fix, text="(0 = detect)", foreground='#666').pack(side='left', padx=4)
+    ttk.Label(ed_fix, text="    save in CRS (EPSG):").pack(side='left')
+    ttk.Entry(ed_fix, textvariable=vars_['grid_epsg'], width=7).pack(side='left')
+    ttk.Label(ed_fix, text="(default 7850)  ·  Save & use (S) writes <grid>_edited.shp; "
+                           "the input file is never changed",
+              foreground='#666').pack(side='left', padx=6)
+    ed_host = ttk.Frame(tab_edit)
+    ed_host.pack(fill='both', expand=True)
+    ed_logbox = tk.Text(tab_edit, height=4, wrap='word', state='disabled',
+                        font=('Consolas', 8))
+    ed_logbox.pack(fill='x', padx=8, pady=(2, 6))
+    editor = {'w': None}
+
+    def ed_log(msg):
+        msg_q.put(('edlog', str(msg)))
+
+    def load_editor(*_):
+        for wdg in ed_host.winfo_children():
+            wdg.destroy()
+        editor['w'] = None
+        pth = ed_grid.get().strip()
+        if not (pth and os.path.exists(pth)):
+            ttk.Label(ed_host, padding=20, foreground='#555', justify='left', text=(
+                "Choose a plot grid (made in tab 1, or any .shp / .geojson) and press "
+                "Load grid." + NL + "Add the RGB orthomosaic to edit the plots on the "
+                "imagery.")).pack(anchor='nw')
+            return
+        w = build_plot_editor(ed_host, pth, lambda new: set_grid(new, "edited grid",
+                                                                 reload_editor=False),
+                              ed_log, embedded=True,
+                              basemap=vars_['edit_basemap'].get().strip(),
+                              out_epsg=lambda: vars_['grid_epsg'].get().strip(),
+                              on_crs=follow_ortho_crs)
+        if w is not None:
+            w.pack(fill='both', expand=True)
+            editor['w'] = w
+            ed_log(f"Editing {pth}")
+    ed_load_btn.configure(command=load_editor)
+    fixgrid_btn.configure(command=on_fix_grid)
+
+    def set_grid(path, why="grid", reload_editor=True):
+        """Make `path` the current grid: the default of tabs 2, 4 and 5."""
+        vars_['current_grid'].set(path)
+        vars_['plots'].set(path)
+        ed_grid.set(path)
+        if iiqx.get('V') is not None:
+            iiqx['V']['plots'].set(path)
+        log(f"Current plot grid ({why}): {path}")
+        ed_log(f"Current plot grid ({why}): {path}  -> used by tabs 4 and 5")
+        save_config()
+        if reload_editor:
+            load_editor()
+    iiqx = {'V': None}
+    root.after(300, load_editor)
+
+    # ---- tab 8: "Acknowledgements" -----------------------------------------
+    try:
+        import iiq as _iiq_ack
+        _iiq_ack.build_ack_tab(tab_ack).pack(fill='both', expand=True)
+    except Exception as e:
+        ttk.Label(tab_ack, justify='left', padding=20, foreground='#a00',
+                  text=("The acknowledgements could not be shown:" + NL + str(e))
+                  ).pack(anchor='nw')
 
     # ---- "Training tiles" tab ---------------------------------------------
     # Cuts the per-plot crops into fixed-size tiles for labelling, and puts
@@ -4067,7 +4432,45 @@ def main():
                         + NL + NL + "It needs rasterio and Pillow, and tiler.py "
                         "next to the application.")).pack(anchor='nw')
 
+    # ---- "QA" tab ------------------------------------------------------------
+    # Per plot: the row detection with the middle band and the tiles, the tiles, the
+    # saved rows; and the checks (raw crops vs source frames, tiles vs crops, rows).
+    try:
+        from qa import build_qa_tab
+        _out = vars_['outdir'].get().strip()
+        qt = build_qa_tab(tab_qa, defaults=dict(
+            run=_out, tiles=os.path.join(_out, "Tiles") if _out else ""))
+        qt.pack(fill='both', expand=True)
+    except Exception as e:
+        ttk.Label(tab_qa, justify='left', padding=20, foreground='#a00',
+                  text=("The QA tab could not be loaded:" + NL + NL + str(e))).pack(anchor='nw')
+
+    # ---- "IIQ plot extraction" and "IIQ conversion" tabs ------------------------
+    # Plot images developed straight from the Phase One IIQ raw files, and IIQ ->
+    # TIFF/GeoTIFF/JPEG conversion (iiq.py; approach after APPN-UQ PhaseOne_Pipeline).
+    for _tab, _name in ((tab_iiqx, "build_iiq_extract_tab"), (tab_iiqc, "build_convert_tab")):
+        try:
+            import iiq as _iiq_mod
+            _f = getattr(_iiq_mod, _name)(_tab)
+            _f.pack(fill='both', expand=True)
+            if _tab is tab_iiqx:
+                # same default grid as tab 4; the user can still pick another file
+                iiqx['V'] = _f.V
+                if not _f.V['plots'].get().strip() and vars_['current_grid'].get():
+                    _f.V['plots'].set(vars_['current_grid'].get())
+        except Exception as e:
+            ttk.Label(_tab, justify='left', padding=20, foreground='#a00',
+                      text=("The IIQ tab could not be loaded:" + NL + NL + str(e))
+                      ).pack(anchor='nw')
+
     root.protocol("WM_DELETE_WINDOW", on_close)
+    # handles for the GUI self-test; not used by the app itself
+    root._pe = dict(nb=nb, vars=vars_, set_grid=set_grid, use_grid=_use_grid, editor=editor,
+                    grid_designer=locals().get('gd'),
+                    ed_grid=ed_grid, load_editor=load_editor, iiqx=iiqx, run_btn=run_btn, logbox=logbox,
+                    state=state, tabs=dict(grid=tab_grid, edit=tab_edit, iiqc=tab_iiqc,
+                                           extract=tab_extract, iiqx=tab_iiqx,
+                                           tiles=tab_tiles, qa=tab_qa, ack=tab_ack))
     if vars_['plots'].get():
         root.after(400, refresh_id_fields)
     poll()
