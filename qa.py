@@ -125,21 +125,25 @@ def check_crops(run_dir, log=print, cancel=None, progress=None):
                     cache["iiq"] = _iiq_developer(run_dir)
                 dev, neutral = cache["iiq"]
                 x0, y0, x1, y1 = (int(float(r[k])) for k in ("src_x0", "src_y0", "src_x1", "src_y1"))
-                ref = dev.develop(r["source_path"], (x0, y0, x1 - x0, y1 - y0))
                 with rasterio.open(p) as s:
                     crop = s.read([1, 2, 3]).transpose(1, 2, 0)
+                bits = 16 if crop.dtype == np.uint16 else 8
+                ref = dev.develop(r["source_path"], (x0, y0, x1 - x0, y1 - y0), bits=bits)
+                top = 65535 if bits == 16 else 255
+                tol = 2 * (257 if bits == 16 else 1)      # 2/255 at either depth
+                rec["bits"] = bits
                 if ref.shape != crop.shape:
                     rec.update(result="FAIL", note=f"size {crop.shape} vs IIQ box {ref.shape}")
                 else:
                     inside = crop.max(axis=2) > 0
-                    diff = np.abs(crop.astype(np.int16) - ref.astype(np.int16)).max(axis=2)
+                    diff = np.abs(crop.astype(np.int32) - ref.astype(np.int32)).max(axis=2)
                     n_in = int(inside.sum())
                     n_same = int((diff[inside] == 0).sum())
                     mx = int(diff[inside].max()) if n_in else 0
                     if n_same == n_in:
                         res_, note = "IDENTICAL", "same as a fresh IIQ development"
-                    elif mx <= 2 and not neutral:
-                        res_, note = "MATCH", (f"within {mx}/255 of a fresh development on "
+                    elif mx <= tol and not neutral:
+                        res_, note = "MATCH", (f"within {mx}/{top} of a fresh development on "
                                                f"{100.0 * (n_in - n_same) / n_in:.1f}% of pixels "
                                                "(the SDK's noise reduction is not "
                                                "bit-repeatable)")
@@ -182,6 +186,7 @@ def check_crops(run_dir, log=print, cancel=None, progress=None):
 
 def check_tiles(tiles_dir, crops_dir, log=print, cancel=None, progress=None):
     import rasterio
+    import tiler
     from rasterio.windows import Window
     from PIL import Image
     idx = _read_csv(os.path.join(tiles_dir, "tile_index.csv"))
@@ -197,8 +202,7 @@ def check_tiles(tiles_dir, crops_dir, log=print, cancel=None, progress=None):
             tp = os.path.join(tiles_dir, t.get("rel_path") or t["tile"])
             sp = os.path.join(crops_dir, t["src"])
             x0, y0, w, h = int(t["x0"]), int(t["y0"]), int(t["w"]), int(t["h"])
-            with Image.open(tp) as im:
-                tile = np.asarray(im.convert("RGB"))
+            tile = tiler.read_rgb(tp)
             if t["src"] not in open_src:
                 for s_ in open_src.values():
                     s_.close()
@@ -210,9 +214,17 @@ def check_tiles(tiles_dir, crops_dir, log=print, cancel=None, progress=None):
                                                     f"a {w}x{h} window (fixed ground scale)")
             else:
                 ref = s.read([1, 2, 3], window=Window(x0, y0, w, h)).transpose(1, 2, 0)
+                conv = ref.dtype != tile.dtype
+                if conv:            # tile written at another bit depth on purpose
+                    ref = tiler.convert_bits(ref, 16 if tile.dtype == np.uint16 else 8)
                 same = bool(np.array_equal(ref, tile))
-                rec.update(pixels="IDENTICAL" if same else "FAIL",
+                rec.update(pixels=("EXACT CONVERSION" if conv else "IDENTICAL") if same
+                           else "FAIL",
                            note="" if same else "tile differs from its window in the crop")
+                if conv and same:
+                    rec["note"] = (f"{8 * np.dtype(s.dtypes[0]).itemsize}-bit window converted "
+                                   f"exactly to {8 * tile.dtype.itemsize}-bit")
+            rec["georef"] = _tile_georef_check(tp, s, x0, y0, w, h)
             rr = rep.get(t["plot_stem"])
             if rr and rr.get("usable_lo", "") != "":
                 ax = int(t.get("across_axis") or 0)
@@ -230,6 +242,33 @@ def check_tiles(tiles_dir, crops_dir, log=print, cancel=None, progress=None):
     for s_ in open_src.values():
         s_.close()
     return res
+
+
+def _tile_georef_check(tile_path, s, x0, y0, w, h):
+    """'' (tile has no georeference), 'OK' or 'WRONG ...': the tile's transform must be
+    the crop's transform moved to the tile window (scaled if resampled)."""
+    if not tile_path.lower().endswith((".tif", ".tiff")):
+        return ""
+    import warnings
+    import rasterio
+    from rasterio.transform import Affine
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")
+        with rasterio.open(tile_path) as t:
+            if t.crs is None and not t.gcps[0]:
+                return ""
+            if t.transform.is_identity:
+                return "GCPs"
+            if s.crs is None or s.transform.is_identity:
+                return "tile georeferenced, crop not"
+            if t.crs != s.crs:
+                return f"WRONG CRS {t.crs} vs {s.crs}"
+            exp = s.transform * Affine.translation(x0, y0) * Affine.scale(
+                w / float(t.width), h / float(t.height))
+            gx, gy = exp * (t.width / 2.0, t.height / 2.0)
+            hx, hy = t.transform * (t.width / 2.0, t.height / 2.0)
+            off = float(np.hypot(gx - hx, gy - hy))
+            return "OK" if off < 1e-6 + abs(exp.a) * 0.01 else f"WRONG by {off:.4f} map units"
 
 
 def check_rows(tiles_dir):
@@ -265,6 +304,7 @@ def check_rows(tiles_dir):
 
 def check_row_images(tiles_dir, crops_dir, cancel=None, progress=None):
     import rasterio
+    import tiler
     from rasterio.windows import Window
     from PIL import Image
     Image.MAX_IMAGE_PIXELS = None
@@ -279,11 +319,12 @@ def check_row_images(tiles_dir, crops_dir, cancel=None, progress=None):
             src = os.path.join(crops_dir, r["plot_stem"] + ".tif")
             if not os.path.exists(src):
                 src = os.path.join(crops_dir, r["plot_stem"] + ".tiff")
-            with Image.open(os.path.join(rdir, r.get("rel_path") or r["file"])) as im:
-                a = np.asarray(im.convert("RGB"))
+            a = tiler.read_rgb(os.path.join(rdir, r.get("rel_path") or r["file"]))
             with rasterio.open(src) as s:
                 ref = s.read([1, 2, 3], window=Window(int(r["x0"]), int(r["y0"]),
                                                       int(r["w"]), int(r["h"]))).transpose(1, 2, 0)
+            if ref.dtype != a.dtype:
+                ref = tiler.convert_bits(ref, 16 if a.dtype == np.uint16 else 8)
             kept = a.max(axis=2) > 0
             same = bool(ref.shape == a.shape and np.array_equal(ref[kept], a[kept]))
             rec.update(kept_px=int(kept.sum()), pixels="IDENTICAL" if same else "FAIL")
@@ -395,7 +436,7 @@ def rows_picture(crop_path, rows_expected=0, n_middle=3, max_side=1600):
     with rasterio.open(crop_path) as s:
         W, H = s.width, s.height
         dec = max(1, int(round(min(W, H) / 1200.0)))
-        small = s.read([1, 2, 3], out_shape=(3, max(1, H // dec), max(1, W // dec)))
+        small = tiler.to8(s.read([1, 2, 3], out_shape=(3, max(1, H // dec), max(1, W // dec))))
         mm = tiler._plot_mm_px(s)
     det = rd.detect_rows(small, mm_px=(mm * W / small.shape[2]) if mm else None,
                          rows_expected=rows_expected)
@@ -406,11 +447,17 @@ def rows_picture(crop_path, rows_expected=0, n_middle=3, max_side=1600):
 def _thumb(path, box):
     from PIL import Image
     Image.MAX_IMAGE_PIXELS = None
-    with Image.open(path) as im:
-        f = max(1, int(max(im.size[0] / box[0], im.size[1] / box[1])))
-        if f > 1:
-            im = im.reduce(f)
-        im = im.convert("RGB")
+    try:
+        with Image.open(path) as im:
+            f = max(1, int(max(im.size[0] / box[0], im.size[1] / box[1])))
+            if f > 1:
+                im = im.reduce(f)
+            im = im.convert("RGB")
+            im.thumbnail(box)
+            return im
+    except Exception:                  # 16-bit RGB (PIL has no such mode): via GDAL
+        import tiler
+        im = Image.fromarray(tiler.to8(tiler.read_rgb(path)))
         im.thumbnail(box)
         return im
 

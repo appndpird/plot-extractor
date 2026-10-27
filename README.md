@@ -39,7 +39,11 @@ single photo holds can be stitched from several photos instead.
   Lower noise and more fine detail than the JPEGs.
 - **IIQ conversion** - IIQ to TIFF (8/16 bit), georeferenced GeoTIFF or JPEG.
 - **Training tiles** - square tiles from the middle N crop rows of every plot (row
-  detection with tilt), kept away from the bare plot ends.
+  detection with tilt), kept away from the bare plot ends. Each tile is an exact copy
+  of its window in the plot image, as a georeferenced GeoTIFF linked to its source
+  photo / IIQ.
+- **8 or 16 bit, LZW or uncompressed** - tab 5 develops plots at 8 or 16 bit; every
+  TIFF / GeoTIFF is written with GDAL, LZW (lossless) or uncompressed, same pixels.
 - **QA** - every crop checked against its source (pixel-identical for JPEGs, a fresh
   development for IIQs), tiles against crops, rows; pictures per plot.
 - **Coordinate system** - outputs in EPSG:7850 (GDA2020 / MGA zone 50) by default,
@@ -55,8 +59,8 @@ single photo holds can be stitched from several photos instead.
 | 2 | **Edit plot grid** | Edits a grid on the RGB orthomosaic: move, reshape, grow/shrink, width, length, shift (one plot, a selection or all), and *Correct grid to rows*. Saves `<grid>_edited.shp` (or `_refit.shp`) beside the input, which is never changed. |
 | 3 | **IIQ conversion** | Phase One IIQ raw files → TIFF (8/16 bit), GeoTIFF (georeferenced from the aligned cameras) or JPEG, with the Phase One ImageSDK. |
 | 4 | **Extract plots** | One image per plot cut from the Phase One JPEG/TIFF renditions (bit-identical pixels), optional rectified/stitched and orthomosaic crops. |
-| 5 | **IIQ plot extraction** | The same extraction, but each plot's box is developed directly from its IIQ raw file (approach of the APPN-UQ PhaseOne_Pipeline, with our changes - see tab 8). |
-| 6 | **Training tiles** | Square tiles from the middle N crop rows of each plot (row detection), kept away from the plot ends. |
+| 5 | **IIQ plot extraction** | The same extraction, but each plot's box is developed directly from its IIQ raw file (approach of the APPN-UQ PhaseOne_Pipeline, with our changes - see tab 8). 8 or 16 bit; LZW or uncompressed. |
+| 6 | **Training tiles** | Square tiles from the middle N crop rows of each plot (row detection), kept away from the plot ends. Exact copies of the plot image (or 8/16-bit conversion), georeferenced, linked to the source photo / IIQ. |
 | 7 | **QA** | Checks crops against their source (JPEG or a fresh IIQ development), tiles against crops, rows; per-plot pictures. |
 | 8 | **Acknowledgements** | Credits APPN (The University of Queensland) and Phase One for the IIQ plot extraction and lists what we changed in their method. |
 
@@ -127,7 +131,8 @@ interchangeable (same plot ranking, different absolute values).
    Test with *Limit* 3, then run all. For the highest quality use **tab 5** with the
    flight's `T0_Raw` IIQ folder instead.
 4. **Tab 6** - tiles from `<output>\RawCrops`: middle 3 rows, sown rows per plot, 4
-   tiles per plot, 0.5 m from the plot ends.
+   tiles per plot, 0.5 m from the plot ends; format tif, bits *same as plot image*, LZW,
+   *Georeference tiles* and *Link tiles to the source photo / IIQ* on.
 5. **Tab 7** - run the checks on the output and the tiles.
 
 Each run writes `RawCrops\plot_<Plot_ID>.tif`, `manifest.csv` (source photo, coverage,
@@ -203,7 +208,8 @@ Questions and problems: open an issue on this repository.
 | Margin (m) | 0.2 | Extra area captured around each plot |
 | Images per plot | 1 | Extra views saved as `plot_<id>_2.png`, … |
 | Limit | 0 | Set e.g. 5 for a quick test run of the first plots |
-| Format | GeoTIFF | **GeoTIFF (geotagged, lossless)**: raw crops carry WGS84 GCPs + the source image's EXIF (GDAL-readable via `gdalinfo`); ortho crops carry a true geotransform with everything outside the plot polygon set to nodata. PNG / TIFF are lossless without geotags; JPEG is smaller but lossy |
+| Format | GeoTIFF | **GeoTIFF (geotagged, lossless)**: raw crops carry an affine georeference in the output CRS (EPSG:7850 by default) fitted through the plot's ground control points, plus the source image's EXIF (GDAL-readable via `gdalinfo`); ortho crops carry a true geotransform with everything outside the plot polygon set to nodata. PNG / TIFF are lossless without geotags; JPEG is smaller but lossy |
+| Auto-fit crop to detected rows | off | Needs an upright crop: with Native, Masked or Bounding box it switches the style to **Rectified** (resampled, may stitch photos). With rows/plot 0 it keeps every row found, including outer rows of neighbouring plots. For the plot only as drawn in the grid: Masked to plot (or Native), margin 0, auto-fit off |
 | Convert raw crops to sRGB | off | Converts each raw crop from its embedded ICC profile (e.g. **Adobe RGB**) to **sRGB**. Tick this when the raw source is Adobe RGB — e.g. Capture One / `T1_Proc` JPEGs — so downstream tools that assume sRGB read the greens correctly. Leave off if the source is already sRGB (e.g. iX-Capture TIFs) |
 | CPU cores | 0 (auto) | Number of cores used for the raw image work (decode / crop / convert / save), which runs in parallel. `0` = auto (min of 8 and the machine's cores). Raise it for faster runs; each active core holds a full decoded frame (~370 MB) in memory |
 
@@ -386,6 +392,29 @@ Docs, figures and a narrated demo: `docs\`.
   and the result whose rows sit on more green is kept (`veg_mode` in
   rows_report.csv: `otsu` or `green`). Dense canopies are unaffected.
 
+### Tile files: exact copies, georeference, link to the IIQ (2026-10-27)
+
+- **Format** tif (default), png or jpeg. With tif or png and **Bits = same as plot
+  image** every tile holds exactly the values of its window in the plot image (8 or 16
+  bit). Bits 8 or 16 converts exactly (16 to 8: value/257 rounded; 8 to 16: value x 257).
+  jpeg is lossy and 8-bit.
+- **TIFF compression** LZW (default) or None - identical pixels.
+- **Georeference tiles** (default on): TIFF tiles are GeoTIFFs with the plot image's CRS
+  and transform moved to the tile window, so a tile pixel has exactly the coordinates of
+  the same pixel in the plot image.
+- **Link tiles to the source photo / IIQ** (default on): tags in each tile
+  (`PLOT_IMAGE`, `PLOT_PIXEL_BOX`, `SOURCE_IMAGE`, `SOURCE_PIXEL_BOX`, `PIXEL_SOURCE`,
+  `IIQ_SETTINGS`, `BIT_DEPTH`) and columns in `tile_index.csv` (`source_image`,
+  `pixel_source`, `src_photo_x0`, `src_photo_y0`, `src_photo_w`, `src_photo_h`,
+  `iiq_settings`, `bits`, `src_bits`, `georef`). The photo box comes from the plot
+  image's box in `manifest.csv` plus the tile offset (masked / bounding box / native
+  crops; rectified or stitched crops have no 1:1 box).
+- All TIFF / PNG tiles are written with GDAL. QA checks every tile pixel by pixel
+  (IDENTICAL, or EXACT CONVERSION for another bit depth) and its georeference.
+- The ground scale of a plot image is now read from its affine georeference as well as
+  from GCPs, so *Fix tile ground scale* and the end distance in metres work on current
+  GeoTIFF crops.
+
 ## 7 · QA tab (2026-10-25)
 
 Open an extraction folder (RawCrops + manifest.csv) and, optionally, its tiles folder.
@@ -438,9 +467,17 @@ copies of the renditions, this tab develops each plot's box from the raw file.
     noise; the only setting the SDK repeats bit for bit.
   - *APPN template*, or any Phase One ConvertConfig JSON file.
   The settings used are copied to `IIQ_settings_used.json`, the run to `IIQ_run.json`.
-- QA: each crop is compared with a fresh development of its box (IDENTICAL; with
-  noise-reduced settings MATCH = within 2/255, because the SDK's noise reduction is not
-  bit-repeatable).
+- **Bits and compression** (2026-10-27): *bits* 8 (default) or 16. 16 bit is the same
+  development at 0-65535 (divided by 257 it matches the 8-bit image to 1/255); it works
+  with the Masked and Bounding box styles and GeoTIFF / TIFF / PNG, not with JPEG or
+  Rectified. *TIFF compression* LZW (default, lossless) or None; both hold the same
+  pixels, LZW files are about 10% smaller. All TIFF / GeoTIFF files are written with
+  GDAL; after the SDK no pixel value is changed (the mask only sets pixels outside the
+  plot to 0). Recommended: GeoTIFF, LZW, 8 bit. 16 bit only for radiometric or exposure
+  work, read with GDAL / rasterio / tifffile (PIL reads 16-bit RGB TIFFs wrongly).
+- QA: each crop is compared with a fresh development of its box at its own bit depth
+  (IDENTICAL; with noise-reduced settings MATCH = within 2/255, because the SDK's noise
+  reduction is not bit-repeatable).
 - The IIQ files are only read: an output folder inside the IIQ folder is refused,
   temporary files go to the output folder, and the size/time of every IIQ used is
   checked again at the end of the run.

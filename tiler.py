@@ -108,12 +108,158 @@ def _starts(a, b, tile, stride):
     return xs
 
 
+def to8(a):
+    """uint8 view of image data for analysis (row detection, vegetation, previews):
+    uint16 is mapped to 0-255 by v/257 rounded (the exact inverse of v*257)."""
+    a = np.asarray(a)
+    if a.dtype == np.uint8:
+        return a
+    return ((a.astype(np.uint32) + 128) // 257).clip(0, 255).astype(np.uint8)
+
+
+def convert_bits(a, bits):
+    """Pixel values at the asked bit depth. bits 'same' (or the array's own depth)
+    returns the array unchanged - the exact copy. 16 -> 8 is v/257 rounded,
+    8 -> 16 is v*257 (0 -> 0, 255 -> 65535; reversible)."""
+    b = str(bits).strip().lower()
+    if b == "8" and a.dtype != np.uint8:
+        return to8(a)
+    if b == "16" and a.dtype == np.uint8:
+        return a.astype(np.uint16) * 257
+    return a
+
+
+def read_rgb(path):
+    """HxWx3 array of an image file with its own bit depth (8 or 16): TIFF/PNG via
+    GDAL, anything else via PIL."""
+    if path.lower().endswith((".tif", ".tiff", ".png")):
+        import warnings
+        import rasterio
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore")
+            with rasterio.open(path) as s:
+                return s.read([1, 2, 3]).transpose(1, 2, 0)
+    from PIL import Image
+    with Image.open(path) as im:
+        return np.asarray(im.convert("RGB"))
+
+
+def write_tile(dest, a, ext, compress="lzw", crs=None, transform=None, gcps=None,
+               tags=None):
+    """Write a 3 x h x w tile, values unchanged (8 or 16 bit). TIFF and PNG are
+    written with GDAL - TIFF as GeoTIFF when crs + transform (or gcps) are given,
+    LZW with horizontal predictor or uncompressed; JPEG (8-bit only) with PIL."""
+    if ext == ".jpg":
+        from PIL import Image
+        if a.dtype != np.uint8:
+            raise ValueError("JPEG is 8-bit only")
+        Image.fromarray(np.transpose(a, (1, 2, 0))).save(dest, quality=95, subsampling=0)
+        return
+    import warnings
+    import rasterio
+    prof = dict(height=a.shape[1], width=a.shape[2], count=3, dtype=a.dtype.name)
+    if ext == ".png":
+        prof["driver"] = "PNG"
+    else:
+        prof.update(driver="GTiff", photometric="RGB")
+        if compress != "none":
+            prof.update(compress="lzw", predictor=2)
+        if crs is not None and transform is not None:
+            prof.update(crs=crs, transform=transform)
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore")            # NotGeoreferencedWarning
+        with rasterio.open(dest, "w", **prof) as dst:
+            dst.write(a)
+            if ext != ".png" and gcps and transform is None:
+                dst.gcps = gcps
+            if tags:
+                dst.update_tags(**{k: str(v) for k, v in tags.items() if v != ""})
+
+
+def _tile_georef(s, x, y, w, h, out_w, out_h):
+    """(crs, transform, gcps) of the tile window (x, y, w, h) of the open crop s,
+    written at out_w x out_h px. Affine crops: shifted (and scaled) transform;
+    GCP-only crops: the GCPs moved into the tile. (None, None, None) if the crop
+    has no georeference."""
+    from rasterio.control import GroundControlPoint
+    from rasterio.transform import Affine
+    sx, sy = w / float(out_w), h / float(out_h)
+    if s.crs is not None and not s.transform.is_identity:
+        return s.crs, s.transform * Affine.translation(x, y) * Affine.scale(sx, sy), None
+    g, gcrs = s.gcps
+    if g and gcrs is not None:
+        moved = [GroundControlPoint(row=(p.row - y) / sy, col=(p.col - x) / sx,
+                                    x=p.x, y=p.y, z=p.z) for p in g]
+        return gcrs, None, (moved, gcrs)
+    return None, None, None
+
+
+def _source_links(src_dir):
+    """Per crop file: the source photo / IIQ and the crop's box in it, from the
+    extraction's manifest.csv (next to RawCrops) and IIQ_run.json."""
+    import json
+    run = os.path.dirname(os.path.abspath(src_dir))
+    links = {}
+    for mf in (os.path.join(run, "manifest.csv"), os.path.join(src_dir, "manifest.csv")):
+        if os.path.exists(mf):
+            try:
+                with open(mf, newline="", encoding="utf-8") as fh:
+                    for rr in csv.DictReader(fh):
+                        if rr.get("raw_file"):
+                            links[rr["raw_file"]] = rr
+            except Exception:
+                pass
+            break
+    iiq = {}
+    try:
+        with open(os.path.join(run, "IIQ_run.json")) as fh:
+            iiq = json.load(fh)
+    except Exception:
+        pass
+    settings = os.path.join(run, "IIQ_settings_used.json")
+    return links, iiq, (settings if os.path.exists(settings) else "")
+
+
+def _link_fields(man, crop_tags, x, y, w, h, iiq_settings):
+    """Index columns / GeoTIFF tags tying a tile to its source photo or IIQ. The
+    pixel box in the photo exists for crops that are a 1:1 box of one frame
+    (masked / bounding box / native); rectified or stitched crops were resampled."""
+    src = (man or {}).get("source_path") or crop_tags.get("SOURCE_IMAGE", "")
+    pix = (man or {}).get("pixel_source") or ("iiq" if src.lower().endswith(".iiq") else
+                                             ("image" if src else ""))
+    style = (man or {}).get("raw_style", "")
+    box = ""
+    one_frame = str((man or {}).get("frames_used") or "1").strip() in ("", "1")
+    if man and style in ("mask", "bbox", "native") and one_frame and man.get("src_x0", "") != "":
+        try:
+            box = (int(float(man["src_x0"])) + x, int(float(man["src_y0"])) + y, w, h)
+        except ValueError:
+            box = ""
+    return dict(source_image=src, pixel_source=pix,
+                src_photo_x0=box[0] if box else "", src_photo_y0=box[1] if box else "",
+                src_photo_w=box[2] if box else "", src_photo_h=box[3] if box else "",
+                iiq_settings=(iiq_settings if pix == "iiq" else ""),
+                link_note=("" if box else
+                           ("crop was resampled (rectified/stitched): no 1:1 pixel box"
+                            if man else "no manifest.csv: pixel box unknown")))
+
+
 def _plot_mm_px(src):
     """Ground sampling of an open raster, mm per pixel, from its GCPs.
 
     Returns None when the file carries no usable georeferencing.
     """
     try:
+        if src.crs is not None and not src.transform.is_identity:
+            # affine-georeferenced crop (the normal GeoTIFF output): pixel size
+            t = src.transform
+            px = math.sqrt(abs(t.a * t.e - t.b * t.d))
+            if src.crs.is_geographic:
+                lat = math.radians((t * (src.width / 2.0, src.height / 2.0))[1])
+                px *= math.sqrt(111320.0 * math.cos(lat) * 110540.0)
+            else:
+                px *= src.crs.linear_units_factor[1] if src.crs.linear_units_factor else 1.0
+            return px * 1000.0 if px > 0 else None
         g, crs = src.gcps
         if len(g) < 2 or crs is None:
             return None
@@ -222,7 +368,7 @@ def _middle_row_cands(s, W, H, across_axis, n_middle, rows_expected, src_mm,
     Returns (cand, info): cand = [(col, row, x, y, side)], info = per-plot report."""
     import row_detect as rd
     dec = max(1, int(round(min(W, H) / 1200.0)))
-    small = s.read([1, 2, 3], out_shape=(3, max(1, H // dec), max(1, W // dec)))
+    small = to8(s.read([1, 2, 3], out_shape=(3, max(1, H // dec), max(1, W // dec))))
     sx = W / float(small.shape[2]); sy = H / float(small.shape[1])
     det = rd.detect_rows(small, across_axis=across_axis,
                          mm_px=(src_mm * sx) if src_mm else None,
@@ -330,7 +476,8 @@ def _write_middle_qa(qa, W, H, across_axis, cand_all, cand_kept):
     im.save(qa_path, quality=88)
 
 
-def _save_rows(s, W, H, across_axis, det_job, rows_dir, stem, ext):
+def _save_rows(s, W, H, across_axis, det_job, rows_dir, stem, ext, bits="same",
+               compress="lzw"):
     """Write each of the plot's crop rows as its own image: <stem>_row<k><ext>, k = 1..n
     across the plot (from image top / left). The image is the axis-aligned box around
     the row's band (row centre +- half a pitch, following the rows' tilt), full plot
@@ -367,13 +514,10 @@ def _save_rows(s, W, H, across_axis, det_job, rows_dir, stem, ext):
             keep = (acr[:, None] >= lo_l[None, :]) & (acr[:, None] < hi_l[None, :])
         else:                                           # across = image x
             keep = (acr[None, :] >= lo_l[:, None]) & (acr[None, :] < hi_l[:, None])
-        a = np.where(keep[None], a, 0).astype(np.uint8)
+        a = convert_bits(np.where(keep[None], a, 0).astype(a.dtype),
+                         8 if ext == ".jpg" else bits)
         name = f"{stem}_row{k}{ext}"
-        im = Image.fromarray(np.transpose(a, (1, 2, 0)))
-        if ext == ".jpg":
-            im.save(os.path.join(rows_dir, name), quality=95, subsampling=0)
-        else:
-            im.save(os.path.join(rows_dir, name))
+        write_tile(os.path.join(rows_dir, name), a, ext, compress)
         x0, y0 = (0, a0) if across_axis == 0 else (a0, 0)
         out.append(dict(file=name, plot_stem=stem, row=k, of_rows=len(det["plot_rows"]),
                         middle=ri in blk, present=bool(det["present"][ri]),
@@ -390,6 +534,7 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                seed=7, target_mm_px=0.0, per_plot_dirs=False,
                middle_rows=0, rows_per_plot=0, band_tile=True, write_qa=True,
                end_margin_m=0.5, tiles_pick="random", save_rows=False,
+               bits="same", compress="lzw", georef=True, link_source=True,
                log=print, progress=None, cancel=None):
     """Cut every crop in `src_dir` into tiles.
 
@@ -426,6 +571,14 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                           each plot as its own image, out_dir/Rows/<plot>/
                           <plot>_row<k>.<ext> (original crop pixels, outside the
                           row masked to 0), indexed in Rows/rows_index.csv.
+    bits                  'same' (default) = the crop's own values, an exact copy;
+                          8 or 16 converts (16->8 v/257 rounded, 8->16 v*257).
+    compress              TIFF compression: 'lzw' (lossless, smaller) or 'none'.
+                          Both hold identical pixels.
+    georef                TIFF tiles are GeoTIFFs: the crop's CRS and transform
+                          shifted to the tile window (or its GCPs moved into it).
+    link_source           tile_index.csv columns and GeoTIFF tags tying each tile
+                          to its source photo / IIQ and its pixel box there.
 
     Returns (n_tiles, n_plots, index_path).
     """
@@ -433,6 +586,15 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
     from PIL import Image
 
     ext = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "tif": ".tif"}.get(fmt.lower(), ".png")
+    bits = str(bits).strip().lower() or "same"
+    compress = "none" if str(compress).lower().startswith(("none", "unc")) else "lzw"
+    if ext == ".jpg" and bits == "16":
+        raise ValueError("JPEG is 8-bit only: choose TIFF or PNG for 16-bit tiles.")
+    if ext != ".tif" and georef:
+        log("[i] georeference is written into TIFF tiles only (PNG/JPEG carry none); "
+            "tile_index.csv still maps every tile to its plot")
+    links, _iiq_run, iiq_settings = (_source_links(src_dir) if link_source
+                                     else ({}, {}, ""))
     os.makedirs(out_dir, exist_ok=True)
     files = sorted(f for f in os.listdir(src_dir)
                    if f.lower().endswith((".tif", ".tiff")))
@@ -470,12 +632,14 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
             + (f", {max_tiles_per_plot} tile(s) per plot ({tiles_pick})" if max_tiles_per_plot
                else ", every tile that fits")
             + f", {ext[1:].upper()} output.")
+        _out_desc(log, ext, bits, compress, georef, link_source)
     else:
         log(f"Tiling {len(files)} plot(s): {tile}px tiles, {overlap}px overlap "
             f"(stride {stride}), {'row band only' if rows_only else 'whole crop'}"
             + (f", {max_tiles_per_plot} tile(s) per plot ({tiles_pick})" if max_tiles_per_plot
                else ", every tile")
             + f", {ext[1:].upper()} output.")
+        _out_desc(log, ext, bits, compress, georef, link_source)
 
     for fi, fn in enumerate(files):
         if cancel is not None and cancel.is_set():
@@ -486,6 +650,7 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
         try:
             with rasterio.open(path) as s:
                 W, H = s.width, s.height
+                crop_tags = s.tags() if link_source else {}
                 # rows run along the long axis; 'across' is the short one
                 across_axis = 0 if H < W else 1
                 # Ground-referenced tiling. Ground sampling varies plot to plot
@@ -520,7 +685,8 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                     det_job = info.pop("_det", None)
                     if save_rows and det_job:
                         recs = _save_rows(s, W, H, across_axis, det_job,
-                                          os.path.join(out_dir, "Rows", stem), stem, ext)
+                                          os.path.join(out_dir, "Rows", stem), stem, ext,
+                                          bits, compress)
                         for rc in recs:
                             rc["rel_path"] = stem + "/" + rc["file"]
                         row_files.extend(recs)
@@ -543,7 +709,7 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                         hi = max((y if across_axis == 0 else x) + sd for (_c, _r, x, y, sd) in cand)
                 elif rows_only:
                     dec = max(1, int(round(min(W, H) / 900)))
-                    small = s.read(out_shape=(3, max(1, H // dec), max(1, W // dec)))
+                    small = to8(s.read([1, 2, 3], out_shape=(3, max(1, H // dec), max(1, W // dec))))
                     l2, h2 = row_band(small, across_axis, pitch_px / dec)
                     lo, hi = l2 * dec, min(hi, h2 * dec)
                     if hi - lo < win_px:    # band thinner than a tile: centre it
@@ -593,10 +759,11 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                     if a.shape[0] < 3:
                         continue
                     rgb = a[:3]
-                    valid = rgb.max(axis=0) > 4
+                    v8 = to8(rgb)                     # analysis only; rgb is written
+                    valid = v8.max(axis=0) > 4
                     if valid.mean() < 0.5:            # mostly nodata
                         continue
-                    R, G, B = (rgb[i].astype(np.float32) for i in range(3))
+                    R, G, B = (v8[i].astype(np.float32) for i in range(3))
                     exg = 2 * G - R - B
                     veg = float((exg[valid] > 18).mean() * 100) if valid.any() else 0.0
                     if min_veg_pct > 0 and veg < min_veg_pct:
@@ -611,16 +778,36 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                     else:
                         dest = os.path.join(out_dir, name)
                         rel = name
-                    im = Image.fromarray(np.transpose(rgb, (1, 2, 0)).astype(np.uint8))
+                    out = convert_bits(rgb, 8 if ext == ".jpg" else bits)
+                    ow, oh = w, h
                     if win_px != out_px:
-                        # proportional, so a clipped window keeps the same scale
-                        im = im.resize((max(1, int(round(w * out_px / win_px))),
-                                        max(1, int(round(h * out_px / win_px)))),
-                                       Image.LANCZOS)
-                    if ext == ".jpg":
-                        im.save(dest, quality=95, subsampling=0)
-                    else:
-                        im.save(dest)
+                        # proportional, so a clipped window keeps the same scale;
+                        # each channel resampled in float (works for 8 and 16 bit)
+                        ow = max(1, int(round(w * out_px / win_px)))
+                        oh = max(1, int(round(h * out_px / win_px)))
+                        top = 255 if out.dtype == np.uint8 else 65535
+                        out = np.stack([np.asarray(Image.fromarray(c.astype(np.float32), "F")
+                                                   .resize((ow, oh), Image.LANCZOS))
+                                        for c in out]).round().clip(0, top).astype(out.dtype)
+                    crs = tf = gc = None
+                    if georef and ext == ".tif":
+                        crs, tf, gc = _tile_georef(s, x, y, w, h, ow, oh)
+                    lk = (_link_fields(links.get(fn), crop_tags, x, y, w, h, iiq_settings)
+                          if link_source else {})
+                    tags = None
+                    if link_source and ext == ".tif":
+                        tags = dict(PLOT_IMAGE=fn, PLOT_PIXEL_BOX=f"{x},{y},{w},{h}",
+                                    SOURCE_IMAGE=lk.get("source_image", ""),
+                                    PIXEL_SOURCE=lk.get("pixel_source", ""),
+                                    IIQ_SETTINGS=os.path.basename(lk.get("iiq_settings", "")),
+                                    SOURCE_PIXEL_BOX=(
+                                        f"{lk['src_photo_x0']},{lk['src_photo_y0']},"
+                                        f"{lk['src_photo_w']},{lk['src_photo_h']}"
+                                        if lk.get("src_photo_x0", "") != "" else ""),
+                                    BIT_DEPTH=f"{8 * out.dtype.itemsize}"
+                                              + ("" if out.dtype == rgb.dtype else
+                                                 f" (converted from {8 * rgb.dtype.itemsize})"))
+                    write_tile(dest, out, ext, compress, crs, tf, gc, tags)
                     rows_out.append(dict(tile=name, rel_path=rel, plot_stem=stem, col=c_i, row=r_i,
                                          x0=x, y0=y, w=w, h=h,
                                          out_px=out_px,
@@ -630,7 +817,12 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                                          band_lo=lo, band_hi=hi,
                                          across_axis=across_axis,
                                          src_w=W, src_h=H, veg_pct=round(veg, 2),
-                                         src=fn))
+                                         src=fn,
+                                         bits=8 * out.dtype.itemsize,
+                                         src_bits=8 * rgb.dtype.itemsize,
+                                         georef=("affine" if tf is not None else
+                                                 "gcps" if gc else ""),
+                                         **lk))
                     kept += 1
         except Exception as e:
             log(f"[!] {fn}: {e}")
@@ -642,9 +834,13 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
     idx = os.path.join(out_dir, "tile_index.csv")
     keys = ["tile", "rel_path", "plot_stem", "col", "row", "x0", "y0", "w", "h", "out_px",
             "src_mm_px", "tile_mm_px", "ground_mm",
-            "band_lo", "band_hi", "across_axis", "src_w", "src_h", "veg_pct", "src"]
+            "band_lo", "band_hi", "across_axis", "src_w", "src_h", "veg_pct", "src",
+            "bits", "src_bits", "georef"]
+    if link_source:
+        keys += ["source_image", "pixel_source", "src_photo_x0", "src_photo_y0",
+                 "src_photo_w", "src_photo_h", "iiq_settings", "link_note"]
     with open(idx, "w", newline="") as fh:
-        wr = csv.DictWriter(fh, fieldnames=keys)
+        wr = csv.DictWriter(fh, fieldnames=keys, extrasaction="ignore")
         wr.writeheader()
         for rr in rows_out:
             wr.writerow(rr)
@@ -684,6 +880,28 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
 # ---------------------------------------------------------------------------
 # stitching back
 # ---------------------------------------------------------------------------
+BITS_CHOICES = ["same as plot image (exact copy)", "8", "16"]
+COMPRESS_CHOICES = ["LZW (lossless, smaller)", "None (uncompressed)"]
+
+
+def bits_key(label):
+    s = str(label).strip()
+    return s if s in ("8", "16") else "same"
+
+
+def _out_desc(log, ext, bits, compress, georef, link_source):
+    if ext == ".jpg":
+        log("Tiles: JPEG quality 95 (lossy, 8-bit) - not an exact copy")
+        return
+    log("Tiles: " + ext[1:].upper()
+        + (", LZW" if (ext == ".tif" and compress == "lzw") else
+           ", uncompressed" if ext == ".tif" else "")
+        + (", the plot image's own values (exact copy)" if bits == "same" else
+           f", converted to {bits}-bit")
+        + (", georeferenced" if (georef and ext == ".tif") else "")
+        + (", linked to the source photo / IIQ" if link_source else ""))
+
+
 def build_tiles_tab(parent, defaults=None):
     """The 'Training tiles' tab: cut tiles, and put labelled tiles back together.
 
@@ -715,7 +933,7 @@ def build_tiles_tab(parent, defaults=None):
         "subdirs": tk.BooleanVar(value=bool(d.get("subdirs", False))),
         "keepempty": tk.StringVar(value=str(d.get("keepempty", 15))),
         "ntiles": tk.StringVar(value=str(d.get("ntiles", 0))),
-        "fmt": tk.StringVar(value=d.get("fmt", "png")),
+        "fmt": tk.StringVar(value=d.get("fmt", "tif")),
         "seed": tk.StringVar(value=str(d.get("seed", 7))),
         "mid_on": tk.BooleanVar(value=bool(d.get("mid_on", False))),
         "mid_n": tk.StringVar(value=str(d.get("mid_n", 3))),
@@ -725,6 +943,10 @@ def build_tiles_tab(parent, defaults=None):
         "mid_pick": tk.StringVar(value=d.get("mid_pick", "random")),
         "mid_end": tk.StringVar(value=str(d.get("mid_end", 0.5))),
         "mid_saverows": tk.BooleanVar(value=bool(d.get("mid_saverows", False))),
+        "bits": tk.StringVar(value=str(d.get("bits", BITS_CHOICES[0]))),
+        "compress": tk.StringVar(value=d.get("compress", COMPRESS_CHOICES[0])),
+        "georef": tk.BooleanVar(value=bool(d.get("georef", True))),
+        "link": tk.BooleanVar(value=bool(d.get("link", True))),
         "stitch_in": tk.StringVar(value=""),
         "stitch_out": tk.StringVar(value=""),
         "grid": tk.BooleanVar(value=True),
@@ -768,7 +990,29 @@ def build_tiles_tab(parent, defaults=None):
         ttk.Entry(o1, textvariable=var, width=w).pack(side="left", padx=(0, 12))
     ttk.Label(o1, text="Format:").pack(side="left", padx=(0, 4))
     ttk.Combobox(o1, textvariable=V["fmt"], width=6, state="readonly",
-                 values=["png", "tif", "jpeg"]).pack(side="left")
+                 values=["tif", "png", "jpeg"]).pack(side="left")
+
+    o1b = ttk.Frame(frm)
+    o1b.grid(row=r, column=0, columnspan=3, sticky="w", pady=4)
+    r += 1
+    ttk.Label(o1b, text="Bits:").pack(side="left", padx=(0, 4))
+    ttk.Combobox(o1b, textvariable=V["bits"], width=28, state="readonly",
+                 values=BITS_CHOICES).pack(side="left", padx=(0, 12))
+    ttk.Label(o1b, text="TIFF compression:").pack(side="left", padx=(0, 4))
+    ttk.Combobox(o1b, textvariable=V["compress"], width=22, state="readonly",
+                 values=COMPRESS_CHOICES).pack(side="left", padx=(0, 12))
+    o1c = ttk.Frame(frm)
+    o1c.grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, 4))
+    r += 1
+    ttk.Checkbutton(o1c, text="Georeference tiles (GeoTIFF, from the plot image)",
+                    variable=V["georef"]).pack(side="left", padx=(0, 12))
+    ttk.Checkbutton(o1c, text="Link tiles to the source photo / IIQ (tags + index)",
+                    variable=V["link"]).pack(side="left")
+    ttk.Label(frm, text="tif + 'same as plot image' = every tile is an exact copy of its "
+                        "window in the plot image (8 or 16 bit); LZW and uncompressed "
+                        "hold identical pixels, LZW files are smaller. JPEG is lossy, 8-bit.",
+              foreground="grey").grid(row=r, column=0, columnspan=3, sticky="w")
+    r += 1
 
     o1n = ttk.Frame(frm)
     o1n.grid(row=r, column=0, columnspan=3, sticky="w", pady=4)
@@ -953,6 +1197,9 @@ def build_tiles_tab(parent, defaults=None):
             band_tile=bool(V["mid_band"].get()), write_qa=bool(V["mid_qa"].get()),
             end_margin_m=_f(V["mid_end"], 0.5), tiles_pick=V["mid_pick"].get() or "random",
             save_rows=bool(V["mid_saverows"].get()),
+            bits=bits_key(V["bits"].get()),
+            compress="none" if V["compress"].get().lower().startswith("none") else "lzw",
+            georef=bool(V["georef"].get()), link_source=bool(V["link"].get()),
             log=put,
             progress=lambda a, b: q.put(("prog", (a, b))), cancel=cancel_ev))
 
@@ -1051,14 +1298,13 @@ def stitch_tiles(tile_dir, out_dir, index_csv="", log=print, progress=None,
                 src = next((c for c in cand if os.path.exists(c)), None)
                 if not src:
                     continue
-                with Image.open(src) as im:
-                    tim = im.convert("RGB")
-                    # ground-referenced tiles were resampled off the source grid;
-                    # put them back at source scale so the plot reassembles square
-                    wh = (int(r["w"]), int(r["h"]))
-                    if tim.size != wh:
-                        tim = tim.resize(wh, Image.LANCZOS)
-                    canvas.paste(tim, (int(r["x0"]) - x0b, int(r["y0"]) - y0b))
+                tim = Image.fromarray(to8(read_rgb(src)))
+                # ground-referenced tiles were resampled off the source grid;
+                # put them back at source scale so the plot reassembles square
+                wh = (int(r["w"]), int(r["h"]))
+                if tim.size != wh:
+                    tim = tim.resize(wh, Image.LANCZOS)
+                canvas.paste(tim, (int(r["x0"]) - x0b, int(r["y0"]) - y0b))
                 drew += 1
             if not drew:
                 continue

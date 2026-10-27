@@ -282,20 +282,23 @@ class Developer:
             self._info[path] = (r["w"], r["h"])
         return self._info[path]
 
-    def develop(self, path, box=None):
+    def develop(self, path, box=None, bits=8):
         """Develop a whole frame (box None) or the box (x, y, w, h) in full-size pixels.
-        Returns an HxWx3 uint8 numpy array."""
+        Returns an HxWx3 numpy array, uint8 (bits=8) or uint16 (bits=16)."""
         import numpy as np
         x, y, w, h = box if box else (0, 0, 0, 0)
+        bits = 16 if int(bits) == 16 else 8
+        dt = np.uint16 if bits == 16 else np.uint8
         tmp = os.path.join(self.work, f"px_{uuid.uuid4().hex}.rgb")
         try:
-            r = self.run([dict(mode="raw", iiq=path, out=tmp, x=x, y=y, w=w, h=h)])[0]
+            r = self.run([dict(mode="raw", iiq=path, out=tmp, x=x, y=y, w=w, h=h,
+                               bits=bits)])[0]
             if not r["ok"]:
                 raise RuntimeError(f"IIQ develop failed ({os.path.basename(path)}): "
                                    f"{r['error']}")
-            a = np.fromfile(tmp, np.uint8)
+            a = np.fromfile(tmp, dt)
             if a.size != r["w"] * r["h"] * 3:
-                raise RuntimeError(f"IIQ develop returned {a.size} bytes for "
+                raise RuntimeError(f"IIQ develop returned {a.size} samples for "
                                    f"{r['w']}x{r['h']}")
             return a.reshape(r["h"], r["w"], 3)
         finally:
@@ -889,6 +892,14 @@ def build_convert_tab(parent):
 # ---------------------------------------------------------------------------
 # Tab: IIQ plot extraction
 # ---------------------------------------------------------------------------
+COMPRESS = ["LZW (lossless, smaller)", "None (uncompressed)"]
+
+
+def compress_key(label):
+    """'lzw' or 'none' from a COMPRESS label (or the key itself)."""
+    return "none" if str(label).lower().startswith(("none", "unc")) else "lzw"
+
+
 STYLES = {"Masked to the plot (developed pixels, outside black)": "mask",
           "Bounding box (developed pixels, no mask)": "bbox",
           "Rectified whole plot (stitched from frames, resampled)": "rectify"}
@@ -921,6 +932,8 @@ def build_iiq_extract_tab(parent):
          "style": tk.StringVar(value=g("style", list(STYLES)[0])),
          "margin": tk.StringVar(value=g("margin", "0.10")),
          "fmt": tk.StringVar(value=g("fmt", "GeoTIFF (geotagged, lossless)")),
+         "bits": tk.StringVar(value=g("bits", "8")),
+         "compress": tk.StringVar(value=g("compress", COMPRESS[0])),
          "workers": tk.StringVar(value=g("workers", "4")),
          "limit": tk.StringVar(value=g("limit", "0")),
          "epsg": tk.StringVar(value=g("epsg") or DEFAULT_EPSG),
@@ -971,7 +984,16 @@ def build_iiq_extract_tab(parent):
     ttk.Combobox(o2, textvariable=V["fmt"], state="readonly", width=30,
                  values=["GeoTIFF (geotagged, lossless)", "TIFF (lossless)",
                          "PNG (lossless)", "JPEG"]).pack(side="left")
-    ttk.Label(o2, text="  parallel plots").pack(side="left")
+    ttk.Label(o2, text="  bits").pack(side="left")
+    ttk.Combobox(o2, textvariable=V["bits"], state="readonly", width=3,
+                 values=["8", "16"]).pack(side="left")
+    ttk.Label(o2, text="  TIFF compression").pack(side="left")
+    ttk.Combobox(o2, textvariable=V["compress"], state="readonly", width=22,
+                 values=COMPRESS).pack(side="left")
+    r += 1
+    o2 = ttk.Frame(frm)
+    o2.grid(row=r, column=1, columnspan=2, sticky="w", padx=6, pady=2)
+    ttk.Label(o2, text="parallel plots").pack(side="left")
     ttk.Spinbox(o2, from_=1, to=16, textvariable=V["workers"], width=4).pack(side="left")
     ttk.Label(o2, text="  test: first").pack(side="left")
     ttk.Spinbox(o2, from_=0, to=10000, textvariable=V["limit"], width=6).pack(side="left")
@@ -980,7 +1002,10 @@ def build_iiq_extract_tab(parent):
     ttk.Label(frm, foreground="#555", justify="left", wraplength=640, text=(
         "Frame per plot: a photo that holds the WHOLE plot (the most nadir/central of "
         "those); if no photo holds the whole plot, the photo holding the largest part of "
-        "it. The chosen box is then developed from that photo's IIQ.")).grid(
+        "it. The chosen box is then developed from that photo's IIQ. "
+        "Bits: 8 (0-255) or 16 (0-65535, from the same development; Masked or Bounding "
+        "box, TIFF/GeoTIFF/PNG). Compression: LZW and uncompressed hold identical pixels; "
+        "LZW files are smaller.")).grid(
         row=r, column=1, columnspan=2, sticky="w", padx=6, pady=(2, 4))
     r += 1
     r = _epsg_row(frm, r, V, "CRS of the GeoTIFF georeference")
@@ -996,6 +1021,7 @@ def build_iiq_extract_tab(parent):
                  limit=V["limit"].get().strip() or "0", do_raw=True, do_ortho=False,
                  crs_override="auto", raw_mode=STYLES.get(V["style"].get(), "mask"),
                  format=V["fmt"].get(), to_srgb=False,
+                 bits=V["bits"].get(), compress=compress_key(V["compress"].get()),
                  workers=V["workers"].get().strip() or "4", auto_fit=False,
                  frame_choice="whole_first", raw_source="iiq",
                  gcp_epsg=V["epsg"].get().strip(),

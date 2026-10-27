@@ -1048,6 +1048,33 @@ def run_extraction(p, log, set_progress, cancel):
     if not geotag:
         log(f"Output format: {ext[1:].upper()}"
             + (f" quality {quality} (lossy)" if ext == '.jpg' else " (lossless)"))
+    # bit depth (16 only for IIQ development) and TIFF compression; LZW and
+    # uncompressed hold identical pixels, LZW files are just smaller
+    bits = 16 if str(p.get('bits') or '8').strip() == '16' else 8
+    compress = ('none' if str(p.get('compress') or 'lzw').lower().startswith(('none', 'unc'))
+                else 'lzw')
+    if ext == '.tif' and compress == 'none':
+        save_kw = {}
+    if bits == 16:
+        if not iiq_mode:
+            log("[!] 16-bit output needs the IIQ raw files (IIQ plot extraction tab); "
+                "the JPEG/TIFF renditions are 8-bit - writing 8-bit")
+            bits = 8
+        elif ext == '.jpg':
+            raise RuntimeError("JPEG is 8-bit only: choose GeoTIFF, TIFF or PNG for "
+                               "16-bit output.")
+        elif raw_mode not in ('mask', 'bbox'):
+            raise RuntimeError("16-bit output is available for the 'Masked to the plot' "
+                               "and 'Bounding box' styles (rectified crops are resampled "
+                               "in 8 bits).")
+        elif auto_fit:
+            log("[!] auto-fit is not used with 16-bit output")
+            auto_fit = False
+    if ext == '.tif':
+        log(f"Bit depth: {bits}-bit per channel; TIFF compression: "
+            + ("LZW (lossless)" if compress == 'lzw' else "none (uncompressed)"))
+    elif bits == 16:
+        log("Bit depth: 16-bit per channel")
 
     # local units-per-metre in chunk CRS (for ortho export), measured at first plot
     def units_per_metre(lon, lat):
@@ -1480,34 +1507,46 @@ def run_extraction(p, log, set_progress, cancel):
                     # the whole frame and cropping, at a fraction of the time)
                     icc = None
                     bw, bh = job['x1'] - job['x0'], job['y1'] - job['y0']
-                    crop = Image.fromarray(iiq_dev.develop(
-                        job['path'], (job['x0'], job['y0'], bw, bh)), 'RGB')
-                    if crop.size != (bw, bh):
-                        raise RuntimeError(f"IIQ box came back {crop.size}, "
-                                           f"expected {(bw, bh)}")
+                    arr = iiq_dev.develop(job['path'], (job['x0'], job['y0'], bw, bh),
+                                          bits=bits)
+                    if arr.shape[:2] != (bh, bw):
+                        raise RuntimeError(f"IIQ box came back {arr.shape[1]}x"
+                                           f"{arr.shape[0]}, expected {bw}x{bh}")
+                    # 16-bit stays a numpy array (PIL has no 16-bit RGB mode)
+                    crop = arr if bits == 16 else Image.fromarray(arr, 'RGB')
                 else:
                     im, icc = load_image(job['path'])
                     crop = im.crop((job['x0'], job['y0'], job['x1'], job['y1']))
                 eff, plot_uv = job['eff'], job['plot_uv']
                 if eff == 'mask' and len(plot_uv) >= 3:
                     from PIL import ImageDraw
-                    mk = Image.new('L', crop.size, 0)
+                    deep = not isinstance(crop, Image.Image)
+                    size = (crop.shape[1], crop.shape[0]) if deep else crop.size
+                    mk = Image.new('L', size, 0)
                     mpoly = job.get('mask_uv') or plot_uv
                     ImageDraw.Draw(mk).polygon([tuple(q) for q in mpoly], fill=255)
-                    crop = Image.composite(crop, Image.new('RGB', crop.size, (0, 0, 0)), mk)
+                    if deep:            # same mask, numpy: values inside are untouched
+                        import numpy as np
+                        crop = np.where(np.asarray(mk)[..., None] > 0, crop,
+                                        0).astype(crop.dtype)
+                    else:
+                        crop = Image.composite(crop, Image.new('RGB', crop.size, (0, 0, 0)), mk)
                 elif eff == 'rectify' and len(plot_uv) == 4:
                     A, B, C, D = plot_uv
                     quad = [A[0], A[1], D[0], D[1], C[0], C[1], B[0], B[1]]
                     crop = crop.transform((job['wpx'], job['hpx']),
                                           Image.QUAD, quad, Image.BICUBIC)
-                crop = to_srgb_crop(crop, icc)
+                if isinstance(crop, Image.Image):
+                    crop = to_srgb_crop(crop, icc)
             if job.get('auto_fit'):
                 crop = _apply_auto_fit(crop, job)
             if job['geotag']:
                 # embed the source ICC only when pixels were NOT converted to
                 # sRGB (converted pixels are sRGB, the default assumption)
                 save_geotiff(job['out'], crop, job['gcps'], exif_tags(job['path']),
-                             log, embed_icc=not to_srgb)
+                             log, embed_icc=not to_srgb, compress=compress)
+            elif ext == '.tif' or not isinstance(crop, Image.Image):
+                write_plain_image(job['out'], crop, compress)   # GDAL: 8/16-bit TIFF, PNG
             else:
                 crop.save(job['out'], **save_kw)
             return (job, None)
@@ -2366,7 +2405,30 @@ def _affine_from_gcps(pts):
     return Affine(cx[0], cx[1], cx[2], cy[0], cy[1], cy[2]), res
 
 
-def save_geotiff(path, pil_img, gcps, tags, log, embed_icc=True):
+def write_plain_image(path, img, compress='lzw', tags=None):
+    """Write an RGB image (PIL or HxWx3 numpy, uint8 or uint16) with GDAL, pixels
+    unchanged: TIFF (LZW + horizontal predictor, or uncompressed) or PNG."""
+    import warnings
+    import numpy as np
+    import rasterio
+    arr = np.asarray(img)
+    ext = os.path.splitext(path)[1].lower()
+    prof = dict(height=arr.shape[0], width=arr.shape[1], count=3, dtype=arr.dtype.name)
+    if ext == '.png':
+        prof['driver'] = 'PNG'
+    else:
+        prof.update(driver='GTiff', photometric='RGB', bigtiff='IF_SAFER')
+        if compress != 'none':
+            prof.update(compress='lzw', predictor=2)
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')        # NotGeoreferencedWarning
+        with rasterio.open(path, 'w', **prof) as dst:
+            dst.write(arr.transpose(2, 0, 1))
+            if tags:
+                dst.update_tags(**tags)
+
+
+def save_geotiff(path, pil_img, gcps, tags, log, embed_icc=True, compress='lzw'):
     """Write an RGB crop as a lossless GeoTIFF, georeferenced with a real
     affine geotransform + CRS fitted through the plot GCPs, so the file opens
     georeferenced in QGIS/GDAL directly (GCP-only files render at pixel
@@ -2380,10 +2442,12 @@ def save_geotiff(path, pil_img, gcps, tags, log, embed_icc=True):
     import rasterio
     from rasterio.control import GroundControlPoint
     from rasterio.crs import CRS
-    arr = np.asarray(pil_img)
+    arr = np.asarray(pil_img)                  # PIL image or HxWx3 uint8/uint16 array
     prof = dict(driver='GTiff', height=arr.shape[0], width=arr.shape[1], count=3,
-                dtype='uint8', compress='lzw', photometric='RGB',
+                dtype=arr.dtype.name, photometric='RGB',
                 tiled=True, blockxsize=512, blockysize=512, bigtiff='IF_SAFER')
+    if compress != 'none':
+        prof.update(compress='lzw', predictor=2)
     icc = _source_icc_b64((tags or {}).get('SOURCE_IMAGE')) if embed_icc else None
     if icc:
         prof['SOURCE_ICC_PROFILE'] = icc     # GDAL writes the TIFF ICC tag
