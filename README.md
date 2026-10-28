@@ -15,7 +15,8 @@ Australia) for the WA node of the Australian Plant Phenomics Network (APPN).
 **Download:** [latest release](https://github.com/appndpird/plot-extractor/releases/latest)
 (Windows 64-bit, no Python needed) · **Guide:**
 [User Guide (PDF)](docs/PlotExtractor_User_Guide.pdf) ·
-[Technical Report (PDF)](docs/PlotExtractor_Technical_Report.pdf)
+[Technical Report (PDF)](docs/PlotExtractor_Technical_Report.pdf) ·
+[Narrated demo video (MP4)](https://github.com/appndpird/plot-extractor/releases/download/v2026.10.27/PlotExtractor_Demo.mp4)
 
 ## Why
 
@@ -141,7 +142,12 @@ pixel box per plot) and `candidates.csv` (every photo that sees each plot).
 ## Documentation
 
 - [User Guide (PDF)](docs/PlotExtractor_User_Guide.pdf) - every tab, step by step, with
-  screenshots, recommended settings and troubleshooting.
+  screenshots, recommended settings and troubleshooting. Section 8.2 shows how tab 5
+  develops a plot from the IIQ; section 9.3 explains how the rows are found (excess green,
+  Otsu threshold and its green fallback, row profile, Fourier row spacing, tilt, comb fit),
+  one figure per step on a real plot.
+- [Narrated demo video (MP4)](https://github.com/appndpird/plot-extractor/releases/download/v2026.10.27/PlotExtractor_Demo.mp4) - the extraction and
+  tiling tabs, IIQ plot extraction, and an animated walk-through of the row detection.
 - [Technical Report (PDF)](docs/PlotExtractor_Technical_Report.pdf) - methods and the
   experiments on the York 2025 calibration trial (fidelity, rows, tiles, frame coverage,
   JPEG vs IIQ-Direct, with block diagrams of both methods).
