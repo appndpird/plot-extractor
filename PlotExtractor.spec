@@ -28,6 +28,8 @@ hidden += ["PIL.ImageTk", "PIL.ImageCms", "PIL._tkinter_finder",
            # ...and the middle-rows option imports the row detector lazily
            "row_detect",
            "qa",
+           # run settings file (PlotExtractor_recipe.json)
+           "recipe",
            # the IIQ tabs (Phase One SDK via iiq_tools\p1tool.exe)
            "iiq"]
 

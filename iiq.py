@@ -914,6 +914,12 @@ def run_iiq_extraction(p, log, progress, cancel):
             raise RuntimeError(f"Choose the {what}.")
     assert_safe_output([p["rawdir"]], p["outdir"])
     os.makedirs(p["outdir"], exist_ok=True)
+    try:
+        import recipe as rcp
+        rcp.write_recipe(p["outdir"], "plot_extraction",
+                         params=dict(p, tab="5 IIQ plot extraction"), log=log)
+    except Exception as e:
+        log(f"[!] recipe: {e}")
     return pe.run_extraction(p, log, progress, cancel)
 
 

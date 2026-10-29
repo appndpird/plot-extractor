@@ -3659,7 +3659,7 @@ def main():
             cfg = {}
 
     root = tk.Tk()
-    root.title("Plot Extractor — raw image per plot")
+    root.title("Plot Extractor 2026.10.30 — raw image per plot")
     root.geometry("1100x780")
     root.minsize(980, 640)
 
@@ -3992,6 +3992,8 @@ def main():
     tile_btn.pack(side='left', padx=8)
     setcrs_btn = ttk.Button(btns, text="Set CRS of existing crops…")
     setcrs_btn.pack(side='left', padx=8)
+    recipe_btn = ttk.Button(btns, text="Load recipe…")
+    recipe_btn.pack(side='left', padx=8)
     prog = ttk.Progressbar(btns, mode='determinate')
     prog.pack(side='left', fill='x', expand=True, padx=8)
 
@@ -4042,6 +4044,21 @@ def main():
                 json.dump(out, f, indent=1)
         except OSError:
             pass
+
+    def load_recipe():
+        import recipe as rcp
+        f = filedialog.askopenfilename(
+            title="Load recipe", filetypes=[("PlotExtractor recipe", "*.json"),
+                                            ("All", "*.*")])
+        if not f:
+            return
+        vals = rcp.gui_section(f, "plot_extraction")
+        if not vals:
+            log(f"[!] {os.path.basename(f)} has no plot_extraction settings from tab 4")
+            return
+        n = rcp.apply_gui(vars_, vals)
+        log(f"Recipe loaded: {n} setting(s) from {f}")
+    recipe_btn.configure(command=load_recipe)
 
     def worker(params):
         try:
@@ -4126,6 +4143,13 @@ def main():
                                  "Margin / images per plot / limit / quality must be numbers.")
             return
         save_config()
+        try:
+            import recipe as rcp
+            rcp.write_recipe(outdir, "plot_extraction", params=params, log=log,
+                             gui={k: (v.get() if not isinstance(v, tk.BooleanVar)
+                                      else bool(v.get())) for k, v in vars_.items()})
+        except Exception as e:
+            log(f"[!] recipe: {e}")
         cancel_ev.clear()
         state['running'] = True
         state['outdir'] = outdir

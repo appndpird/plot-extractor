@@ -16,7 +16,7 @@ Australia) for the WA node of the Australian Plant Phenomics Network (APPN).
 (Windows 64-bit, no Python needed) · **Guide:**
 [User Guide (PDF)](docs/PlotExtractor_User_Guide.pdf) ·
 [Technical Report (PDF)](docs/PlotExtractor_Technical_Report.pdf) ·
-[Narrated demo video (MP4)](https://github.com/appndpird/plot-extractor/releases/download/v2026.10.27/PlotExtractor_Demo.mp4)
+[Narrated demo video (MP4)](https://github.com/appndpird/plot-extractor/releases/download/v2026.10.30/PlotExtractor_Demo.mp4)
 
 ## Why
 
@@ -39,10 +39,14 @@ single photo holds can be stitched from several photos instead.
   Phase One ImageSDK (approach of APPN, The University of Queensland, extended).
   Lower noise and more fine detail than the JPEGs.
 - **IIQ conversion** - IIQ to TIFF (8/16 bit), georeferenced GeoTIFF or JPEG.
-- **Training tiles** - square tiles from the middle N crop rows of every plot (row
-  detection with tilt), kept away from the bare plot ends. Each tile is an exact copy
-  of its window in the plot image, as a georeferenced GeoTIFF linked to its source
-  photo / IIQ.
+- **Training tiles** - tiles of a fixed ground size (1 m x 1 m by default), the same
+  pixel size on every plot, from the middle N crop rows (row detection with tilt) or the
+  whole plot, kept away from the bare plot ends; georeferenced GeoTIFFs linked to their
+  source photo / IIQ.
+- **Rows and row tiles** - whole crop rows (all, middle N or chosen rows) and same-size
+  tiles (e.g. 1 m along the row) along each row, in one folder per plot.
+- **Recipe file** - every run records its settings in `PlotExtractor_recipe.json`;
+  *Load recipe...* repeats them.
 - **8 or 16 bit, LZW or uncompressed** - tab 5 develops plots at 8 or 16 bit; every
   TIFF / GeoTIFF is written with GDAL, LZW (lossless) or uncompressed, same pixels.
 - **QA** - every crop checked against its source (pixel-identical for JPEGs, a fresh
@@ -61,7 +65,7 @@ single photo holds can be stitched from several photos instead.
 | 3 | **IIQ conversion** | Phase One IIQ raw files → TIFF (8/16 bit), GeoTIFF (georeferenced from the aligned cameras) or JPEG, with the Phase One ImageSDK. |
 | 4 | **Extract plots** | One image per plot cut from the Phase One JPEG/TIFF renditions (bit-identical pixels), optional rectified/stitched and orthomosaic crops. |
 | 5 | **IIQ plot extraction** | The same extraction, but each plot's box is developed directly from its IIQ raw file (approach of the APPN-UQ PhaseOne_Pipeline, with our changes - see tab 8). 8 or 16 bit; LZW or uncompressed. |
-| 6 | **Training tiles** | Square tiles from the middle N crop rows of each plot (row detection), kept away from the plot ends. Exact copies of the plot image (or 8/16-bit conversion), georeferenced, linked to the source photo / IIQ. |
+| 6 | **Training tiles** | **6a** tiles of a fixed ground size (1 m x 1 m by default, the same pixel size on every plot) from the middle N crop rows or the whole plot; **6b** whole rows (all / middle N / chosen rows) and same-size tiles along each row. Georeferenced, linked to the source photo / IIQ; settings saved in a recipe file. |
 | 7 | **QA** | Checks crops against their source (JPEG or a fresh IIQ development), tiles against crops, rows; per-plot pictures. |
 | 8 | **Acknowledgements** | Credits APPN (The University of Queensland) and Phase One for the IIQ plot extraction and lists what we changed in their method. |
 
@@ -131,9 +135,10 @@ interchangeable (same plot ranking, different absolute values).
    folder; the grid is already filled in. Margin 0.10 m, *Masked to plot*, GeoTIFF.
    Test with *Limit* 3, then run all. For the highest quality use **tab 5** with the
    flight's `T0_Raw` IIQ folder instead.
-4. **Tab 6** - tiles from `<output>\RawCrops`: middle 3 rows, sown rows per plot, 4
-   tiles per plot, 0.5 m from the plot ends; format tif, bits *same as plot image*, LZW,
-   *Georeference tiles* and *Link tiles to the source photo / IIQ* on.
+4. **Tab 6a** - tiles from `<output>\RawCrops`: tile size 1.0 m, middle 3 rows, sown
+   rows per plot, 0.5 m from the plot ends; format tif, bits *same as plot image*, LZW,
+   *Georeference tiles* and *Link tiles to the source photo / IIQ* on. **Tab 6b** - rows
+   `all`, whole rows + 1 m row tiles.
 5. **Tab 7** - run the checks on the output and the tiles.
 
 Each run writes `RawCrops\plot_<Plot_ID>.tif`, `manifest.csv` (source photo, coverage,
@@ -143,10 +148,10 @@ pixel box per plot) and `candidates.csv` (every photo that sees each plot).
 
 - [User Guide (PDF)](docs/PlotExtractor_User_Guide.pdf) - every tab, step by step, with
   screenshots, recommended settings and troubleshooting. Section 8.2 shows how tab 5
-  develops a plot from the IIQ; section 9.3 explains how the rows are found (excess green,
+  develops a plot from the IIQ; section 9.5 explains how the rows are found (excess green,
   Otsu threshold and its green fallback, row profile, Fourier row spacing, tilt, comb fit),
   one figure per step on a real plot.
-- [Narrated demo video (MP4)](https://github.com/appndpird/plot-extractor/releases/download/v2026.10.27/PlotExtractor_Demo.mp4) - the extraction and
+- [Narrated demo video (MP4)](https://github.com/appndpird/plot-extractor/releases/download/v2026.10.30/PlotExtractor_Demo.mp4) - the extraction and
   tiling tabs, IIQ plot extraction, and an animated walk-through of the row detection.
 - [Technical Report (PDF)](docs/PlotExtractor_Technical_Report.pdf) - methods and the
   experiments on the York 2025 calibration trial (fidelity, rows, tiles, frame coverage,
@@ -173,7 +178,8 @@ tabs, build `iiq_tools\p1tool.exe` with `iiq_tools\build_p1tool.bat "<ImageSDK f
 | `grid_refit.py` | *Correct grid to rows* (tab 2) |
 | `iiq.py` | Tabs 3, 5 and 8: IIQ conversion, IIQ plot extraction, acknowledgements |
 | `iiq_tools/` | `src/p1tool.cpp` (Phase One ImageSDK helper), `build_p1tool.bat`, development presets |
-| `tiler.py`, `row_detect.py` | Tab 6, training tiles and row detection |
+| `tiler.py`, `row_detect.py` | Tab 6 (6a plot tiles, 6b rows and row tiles) and row detection |
+| `recipe.py` | `PlotExtractor_recipe.json`: the settings of every run, *Load recipe...* |
 | `qa.py` | Tab 7, quality checks |
 | `docs/` | User Guide and Technical Report (PDF), images, older presentation and demo scripts |
 | `THIRD_PARTY_NOTICES.md` | APPN-UQ MIT licence and Phase One SDK note |
@@ -349,7 +355,67 @@ metres even when the ortho is in a geographic (degrees) CRS.
 Fine-tune the result on **tab 2, Edit plot grid** (move/resize/shift, width and length
 tools, correct to rows) before extracting.
 
+## 6 · Training tiles: fixed ground size, rows and row tiles, recipe (2026-10-30)
+
+Tab 6 now has two sub-tabs.
+
+**6a · Plot tiles (fixed ground size).** *Tile size* and *Overlap* are in **metres**
+(default 1.0 m x 1.0 m, overlap 0). Every tile covers the same ground **and** has the same
+pixel size on every plot and within each plot:
+
+- The ground scale (mm/px) of every plot image is read from its georeference first; the
+  run uses one **output scale**: the scale of the plot nearest the median, or *Output
+  scale (mm/px)* when set (set it to the same value in every run to match tiles across
+  trials). A tile is `tile size / output scale` px square (York raw: 1 m / 0.568 mm =
+  1761 px).
+- On each plot the window is `tile size / plot scale` px and is resampled (Lanczos) to the
+  tile size when the plot's scale differs; plots at the output scale are exact copies.
+  `tile_index.csv` has `tile_m` and `resampled` columns.
+- Only whole tiles are written (a plot smaller than a tile gets none, logged). Middle-row
+  tiles are centred on the band of the N central rows and laid end to end, centred in
+  the usable length. The log ends with a size check.
+- *Square tiles spanning the band* and *save each row* were removed from this tab: whole
+  rows are now on 6b.
+
+**6b · Rows and row tiles.** For every plot:
+
+- **Rows**: `all`, `middle N`, or row numbers such as `1,2,3` / `2-4` (rows numbered 1..n
+  across the plot from the image top, or left when the rows run up-down; *sown rows per
+  plot* fixes which rows count).
+- **Whole rows** -> `<out>\<plot>\rows\<plot>_row<k>.tif`: the full plot length, the
+  crop's pixels inside the row's band (centre +- half a spacing, following the tilt), 0
+  outside.
+- **Row tiles** -> `<out>\<plot>\row_tiles\row<k>\<plot>_row<k>_t<j>.tif`: *tile length
+  along the row* (default 1.0 m) x *tile width across* (blank = the median row spacing of
+  the plots), centred on the row line, end to end over the row's whole length in the plot
+  (crop ends minus the extraction margin; no vegetation threshold, no planted-length
+  trim; optional end distance and overlap). One output scale per run, so every row tile
+  of every row and plot has the same pixel size (York raw: 1761 x 379 px).
+- *Turn so the row runs left-right* (default on): plots whose rows run up-down are turned
+  90 deg (lossless; the georeference is turned with them).
+- Writes `rows_index.csv`, `row_tiles_index.csv` (box in the crop, output size, turned,
+  resampled, scales, source-photo link), `rows_report.csv` and `_rows_qa\<plot>_rows.jpg`
+  (rows green, row tiles cyan). GeoTIFF / link / bits / compression options as in 6a.
+
+**Recipe file.** Every run writes `PlotExtractor_recipe.json` in its output folder, with
+one section per step: `plot_extraction` (tab 4 and tab 5), `plot_tiles` (6a),
+`rows_and_row_tiles` (6b) - every field, the values passed to the run and the results. A
+tiles run also copies the `plot_extraction` section from the recipe next to `RawCrops`,
+so the tiles folder records the whole chain. **Load recipe...** on tabs 4, 6a and 6b
+fills the fields from a recipe file (`recipe.py`).
+
+Tested on the York 2025 calibration trial (36 plots, raw and rectified crops): 6a 372 /
+360 tiles all 1761 / 1685 px square (1.000 m), middle-3-rows 108 tiles all 1761 px; 6b
+180 whole rows and 707 / 718 row tiles all one size; tiles at the output scale
+identical to the crop pixels; turned row tiles exactly `rot90` of the crop window with
+0.000 mm georeference error (affine and GCP crops).
+
+![Tab 6b](docs/images/app_tab6b_rows.png)
+
 ## 6 · Training tiles: middle rows (2026-10-24)
+
+*(Since 2026-10-30 the tiles are a fixed size in metres and whole rows are on tab 6b; see
+above.)*
 
 On the **Training tiles** tab, tick **Tile only the middle N rows** to cut tiles from
 the N central crop rows of every plot only (e.g. the middle 3 of 5 or 7 rows). The line

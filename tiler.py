@@ -294,7 +294,8 @@ def _usable_length(small, across_axis, det, band, mm_small, ext_margin_mm, end_m
                     planted length is at least half the plot: sparse emergence
                     must not shrink the plot to a few clumps)
       usable        the tighter of plot/planted ends, moved in by end_margin_mm.
-    Returns dict(u0, u1, d0, d1, p0, p1, trim) in reduced-copy pixels."""
+    Returns dict(u0, u1, d0, d1, p0, p1, q0, q1, trim) in reduced-copy pixels;
+    q0, q1 = the plot ends before any planted-length trim."""
     a = small[:3].astype(np.float32)
     if across_axis == 1:                        # make axis 1 = across, axis 2 = along
         a = a.transpose(0, 2, 1)
@@ -314,13 +315,14 @@ def _usable_length(small, across_axis, det, band, mm_small, ext_margin_mm, end_m
     data = (bcnt > 0) & (vcnt >= 0.9 * np.maximum(bcnt, 1))
     idx = np.nonzero(data)[0]
     if not len(idx):
-        return dict(u0=0, u1=nl, d0=0, d1=nl, p0=0, p1=nl, trim="none")
+        return dict(u0=0, u1=nl, d0=0, d1=nl, p0=0, p1=nl, q0=0, q1=nl, trim="none")
     d0, d1 = int(idx[0]), int(idx[-1]) + 1
     px_per_mm = (1.0 / mm_small) if mm_small else None
     em = int(round(ext_margin_mm * px_per_mm)) if (px_per_mm and ext_margin_mm) else 0
     p0, p1 = d0 + em, d1 - em
     if p1 - p0 < 8:
         p0, p1 = d0, d1
+    q0, q1 = p0, p1
     trim = "plot ends"
     gfrac = np.where(data, (veg & inb).sum(axis=0) / np.maximum(vcnt, 1), 0.0)
     k = int(round(300.0 * px_per_mm)) if px_per_mm else max(5, nl // 25)
@@ -338,7 +340,7 @@ def _usable_length(small, across_axis, det, band, mm_small, ext_margin_mm, end_m
         e = int(round(end_margin_mm * px_per_mm))
     else:                                       # no ground scale: 8 % of the plot
         e = int(round(0.08 * (p1 - p0)))
-    return dict(u0=p0 + e, u1=p1 - e, d0=d0, d1=d1, p0=p0, p1=p1, trim=trim)
+    return dict(u0=p0 + e, u1=p1 - e, d0=d0, d1=d1, p0=p0, p1=p1, q0=q0, q1=q1, trim=trim)
 
 
 def _pick(cand, n, how, rnd):
@@ -354,7 +356,7 @@ def _pick(cand, n, how, rnd):
 
 def _middle_row_cands(s, W, H, across_axis, n_middle, rows_expected, src_mm,
                       row_pitch_mm, band_tile, win_px, overlap, qa_path=None,
-                      ext_margin_mm=0.0, end_margin_mm=500.0):
+                      ext_margin_mm=0.0, end_margin_mm=500.0, strict=False):
     """Tile candidates covering the n_middle central crop rows of one plot.
 
     Rows are found with row_detect (the PhenoFuse RGB row detection) on a reduced
@@ -363,7 +365,8 @@ def _middle_row_cands(s, W, H, across_axis, n_middle, rows_expected, src_mm,
     width, laid end to end along the plot (native pixels, no overlap); otherwise
     win_px tiles centred on the band. Along the plot the tiles stay inside the
     usable length (_usable_length: away from the bare plot ends by end_margin_mm)
-    and are centred in it.
+    and are centred in it. strict: the tile size is fixed (ground tiles); a plot
+    narrower than one tile gets none instead of a smaller tile.
 
     Returns (cand, info): cand = [(col, row, x, y, side)], info = per-plot report."""
     import row_detect as rd
@@ -402,6 +405,9 @@ def _middle_row_cands(s, W, H, across_axis, n_middle, rows_expected, src_mm,
     across_len = H if across_axis == 0 else W
     along_len = W if across_axis == 0 else H
     side = int(round(hi - lo)) if band_tile else int(win_px)
+    if strict and side > across_len:
+        info["reason"] = f"plot is {across_len} px across, one tile is {side} px"
+        return [], info
     side = max(8, min(side, across_len))
     stride = side if band_tile else max(1, side - max(0, overlap))
     # the rows may be tilted in a raw (unrectified) crop: the band centre moves
@@ -420,6 +426,12 @@ def _middle_row_cands(s, W, H, across_axis, n_middle, rows_expected, src_mm,
             n_fit = 1
         first = u0 + (span - n_fit * side) / 2.0
         starts = [int(round(first + i * side)) for i in range(n_fit)]
+    elif strict:                                # ground tiles: end to end, centred
+        starts = []
+        if span >= side:
+            nt = int((span - side) // stride) + 1
+            first = u0 + (span - (side + (nt - 1) * stride)) / 2.0
+            starts = [int(round(first + i * stride)) for i in range(nt)]
     else:
         starts = _starts(int(round(u0)), int(round(u1)), side, stride) if span >= side else []
     mm = src_mm or 0.0
@@ -477,12 +489,15 @@ def _write_middle_qa(qa, W, H, across_axis, cand_all, cand_kept):
 
 
 def _save_rows(s, W, H, across_axis, det_job, rows_dir, stem, ext, bits="same",
-               compress="lzw"):
+               compress="lzw", select=None, horizontal=False, names=None):
     """Write each of the plot's crop rows as its own image: <stem>_row<k><ext>, k = 1..n
     across the plot (from image top / left). The image is the axis-aligned box around
     the row's band (row centre +- half a pitch, following the rows' tilt), full plot
     length; pixels outside the band are set to 0, everything inside is the crop's own
     pixels (no resampling - the row strip of a raw crop is original camera pixels).
+    select: row numbers k to write (None = all). horizontal: turn the image 90 deg
+    when the rows run up-down in the crop, so every row image runs left-right
+    (lossless). names: k -> file name (default <stem>_row<k><ext>).
     Returns one index record per row."""
     import rasterio.windows
     from PIL import Image
@@ -497,6 +512,8 @@ def _save_rows(s, W, H, across_axis, det_job, rows_dir, stem, ext, bits="same",
     out = []
     al = np.arange(along_len, dtype=np.float64)
     for k, ri in enumerate(det["plot_rows"], 1):
+        if select is not None and k not in select:
+            continue
         c = det["rows"][ri] * f
         lo_l = c - P / 2.0 + t * (al - lc)               # band edges along the plot
         hi_l = c + P / 2.0 + t * (al - lc)
@@ -516,7 +533,10 @@ def _save_rows(s, W, H, across_axis, det_job, rows_dir, stem, ext, bits="same",
             keep = (acr[None, :] >= lo_l[:, None]) & (acr[None, :] < hi_l[:, None])
         a = convert_bits(np.where(keep[None], a, 0).astype(a.dtype),
                          8 if ext == ".jpg" else bits)
-        name = f"{stem}_row{k}{ext}"
+        turned = bool(horizontal and across_axis == 1)
+        if turned:
+            a = np.ascontiguousarray(np.rot90(a, 1, axes=(1, 2)))
+        name = (names or {}).get(k) or f"{stem}_row{k}{ext}"
         write_tile(os.path.join(rows_dir, name), a, ext, compress)
         x0, y0 = (0, a0) if across_axis == 0 else (a0, 0)
         out.append(dict(file=name, plot_stem=stem, row=k, of_rows=len(det["plot_rows"]),
@@ -524,7 +544,9 @@ def _save_rows(s, W, H, across_axis, det_job, rows_dir, stem, ext, bits="same",
                         contrast=round(float(det["contrast"][ri]), 3),
                         centre_px=round(c, 1), width_px=round(P, 1),
                         angle_deg=round(det["angle_deg"], 2),
-                        x0=x0, y0=y0, w=a.shape[2], h=a.shape[1], across_axis=across_axis))
+                        x0=x0, y0=y0, w=(a.shape[1] if turned else a.shape[2]),
+                        h=(a.shape[2] if turned else a.shape[1]), across_axis=across_axis,
+                        turned_90=turned))
     return out
 
 
@@ -535,9 +557,17 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                middle_rows=0, rows_per_plot=0, band_tile=True, write_qa=True,
                end_margin_m=0.5, tiles_pick="random", save_rows=False,
                bits="same", compress="lzw", georef=True, link_source=True,
+               tile_m=0.0, overlap_m=0.0,
                log=print, progress=None, cancel=None):
     """Cut every crop in `src_dir` into tiles.
 
+    tile_m / overlap_m    > 0: GROUND tiles - every tile covers tile_m x tile_m metres
+                          and has the same pixel size on every plot: the window is
+                          tile_m / (plot mm/px) source pixels, written at the output
+                          scale target_mm_px (0 = the median mm/px of the plots), i.e.
+                          tile_m / target px. Plots at that scale are copied exactly,
+                          others resampled (Lanczos). Only whole tiles are written.
+                          tile / overlap / band_tile are then derived / ignored.
     tile / overlap        pixels. stride = tile - overlap.
     rows_only             restrict to the measured seed-row band.
     row_pitch_mm          row spacing; only used to find the band. 0 = guess from
@@ -601,6 +631,41 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
     if not files:
         log(f"[!] no GeoTIFF crops in {src_dir}")
         return 0, 0, ""
+    uniform = tile_m > 0
+    if uniform:
+        # ground tiles: one output scale for the whole run, so every tile has the
+        # same pixel size and the same ground size
+        gsd = {}
+        for fn in files:
+            try:
+                with rasterio.open(os.path.join(src_dir, fn)) as s0:
+                    m = _plot_mm_px(s0)
+                    if m is None and plot_width_mm > 0:
+                        m = plot_width_mm / float(min(s0.width, s0.height))
+                    if m:
+                        gsd[fn] = m
+            except Exception:
+                pass
+        if not gsd:
+            log("[!] the plot images carry no ground scale (no georeference) and no "
+                "plot width was given: tiles in metres cannot be cut")
+            return 0, 0, ""
+        miss = [f for f in files if f not in gsd]
+        if miss:
+            log(f"[!] {len(miss)} plot image(s) have no ground scale and are skipped: "
+                + ", ".join(miss[:5]) + (" ..." if len(miss) > 5 else ""))
+            files = [f for f in files if f in gsd]
+        v = np.array(list(gsd.values()))
+        if target_mm_px <= 0:                  # the plot nearest the median: its
+            target_mm_px = float(v[np.argmin(abs(v - np.median(v)))])   # tiles are exact
+        tile = max(8, int(round(tile_m * 1000.0 / target_mm_px)))
+        overlap = max(0, int(round(overlap_m * 1000.0 / target_mm_px)))
+        if overlap >= tile:
+            raise ValueError("Overlap must be smaller than the tile size.")
+        band_tile = False
+        log(f"Ground tiles: {tile_m:g} m x {tile_m:g} m, overlap {overlap_m:g} m. Plot images "
+            f"{v.min():.3f}-{v.max():.3f} mm/px (median {np.median(v):.3f}); output "
+            f"{target_mm_px:.3f} mm/px -> every tile {tile} x {tile} px.")
     stride = max(1, tile - max(0, overlap))
     rnd = random.Random(seed)
     rows_out = []
@@ -627,6 +692,7 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
             f"plot (rows detected per plot"
             + (f", {rows_per_plot} sown rows" if rows_per_plot else "") + "), "
             + ("square tiles spanning the band, native pixels" if band_tile
+               else f"{tile_m:g} m tiles on the band" if uniform
                else f"{tile}px tiles on the band")
             + f", tiles kept {end_margin_m:.2f} m inside the planted plot ends"
             + (f", {max_tiles_per_plot} tile(s) per plot ({tiles_pick})" if max_tiles_per_plot
@@ -634,8 +700,10 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
             + f", {ext[1:].upper()} output.")
         _out_desc(log, ext, bits, compress, georef, link_source)
     else:
-        log(f"Tiling {len(files)} plot(s): {tile}px tiles, {overlap}px overlap "
-            f"(stride {stride}), {'row band only' if rows_only else 'whole crop'}"
+        log(f"Tiling {len(files)} plot(s): "
+            + (f"{tile_m:g} m tiles, {overlap_m:g} m overlap " if uniform else
+               f"{tile}px tiles, {overlap}px overlap ")
+            + f"(stride {stride} px), {'row band only' if rows_only else 'whole crop'}"
             + (f", {max_tiles_per_plot} tile(s) per plot ({tiles_pick})" if max_tiles_per_plot
                else ", every tile")
             + f", {ext[1:].upper()} output.")
@@ -662,6 +730,8 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                 src_mm = _plot_mm_px(s) if (target_mm_px > 0 or middle_rows > 0) else None
                 if src_mm is None and middle_rows > 0 and plot_width_mm > 0:
                     src_mm = plot_width_mm / float(H if across_axis == 0 else W)
+                if uniform:
+                    src_mm = gsd[fn]
                 win_px = tile
                 if target_mm_px > 0 and src_mm and src_mm > 0:
                     win_px = max(8, int(round(tile * target_mm_px / src_mm)))
@@ -678,9 +748,10 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                         qa = os.path.join(out_dir, "_rows_qa", stem + "_rows.jpg")
                     cand, info = _middle_row_cands(
                         s, W, H, across_axis, middle_rows, rows_per_plot, src_mm,
-                        row_pitch_mm, band_tile, win_px, overlap, qa,
+                        row_pitch_mm, band_tile, win_px,
+                        int(round(overlap * win_px / max(1, tile))), qa,
                         ext_margin_mm=1000.0 * ext_margin.get(fn, 0.0),
-                        end_margin_mm=1000.0 * max(0.0, end_margin_m))
+                        end_margin_mm=1000.0 * max(0.0, end_margin_m), strict=uniform)
                     qa_job = info.pop("_qa", None)
                     det_job = info.pop("_det", None)
                     if save_rows and det_job:
@@ -729,8 +800,13 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                     for r_i, y in enumerate(_starts(y0b, y1b, win_px, src_stride)):
                         for c_i, x in enumerate(_starts(x0b, x1b, win_px, src_stride)):
                             cand.append((c_i, r_i, x, y, win_px))
-                    if not cand:
+                    if not cand and not uniform:
                         cand = [(0, 0, x0b, y0b, win_px)]
+                    if uniform:                 # whole tiles only
+                        cand = [c for c in cand if c[2] + win_px <= W and c[3] + win_px <= H]
+                        if not cand:
+                            log(f"[!] {fn}: {W}x{H} px is smaller than one "
+                                f"{tile_m:g} m tile ({win_px} px) - skipped")
                     if max_tiles_per_plot and tiles_pick != "spread":
                         # random: walk a shuffled list until N tiles are kept, so
                         # tiles dropped as nodata / low vegetation are back-filled
@@ -754,6 +830,8 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                     win_px = side
                     w = min(win_px, W - x); h = min(win_px, H - y)
                     if w < win_px // 2 or h < win_px // 2:
+                        continue
+                    if uniform and (w < win_px or h < win_px):
                         continue
                     a = s.read(window=rasterio.windows.Window(x, y, w, h))
                     if a.shape[0] < 3:
@@ -813,6 +891,8 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                                          out_px=out_px,
                                          src_mm_px=round(src_mm, 4) if src_mm else "",
                                          tile_mm_px=round(target_mm_px, 4) if (src_mm and target_mm_px) else "",
+                                         tile_m=tile_m if uniform else "",
+                                         resampled=(win_px != out_px),
                                          ground_mm=round(w * (src_mm or 0), 1) if src_mm else "",
                                          band_lo=lo, band_hi=hi,
                                          across_axis=across_axis,
@@ -833,7 +913,7 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
 
     idx = os.path.join(out_dir, "tile_index.csv")
     keys = ["tile", "rel_path", "plot_stem", "col", "row", "x0", "y0", "w", "h", "out_px",
-            "src_mm_px", "tile_mm_px", "ground_mm",
+            "src_mm_px", "tile_mm_px", "ground_mm", "tile_m", "resampled",
             "band_lo", "band_hi", "across_axis", "src_w", "src_h", "veg_pct", "src",
             "bits", "src_bits", "georef"]
     if link_source:
@@ -874,7 +954,413 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
         v = np.array([r["veg_pct"] for r in rows_out])
         log(f"Vegetation per tile: median {np.median(v):.2f}%  "
             f"empty (<0.5%) {100*(v<0.5).mean():.1f}%")
+        if uniform:
+            sz = {(r["out_px"]) for r in rows_out}
+            log(f"Tile size check: {len(rows_out)} tiles, pixel sizes {sorted(sz)} "
+                f"({'all the same' if len(sz) == 1 else 'NOT uniform'}); "
+                f"{sum(1 for r in rows_out if not r['resampled'])} exact copies, "
+                f"{sum(1 for r in rows_out if r['resampled'])} resampled to "
+                f"{target_mm_px:.3f} mm/px")
     return len(rows_out), plots, idx
+
+
+# ---------------------------------------------------------------------------
+# whole rows and fixed-size tiles along each row (tab 6b)
+# ---------------------------------------------------------------------------
+def parse_rows(text):
+    """Which crop rows to use: 'all' -> ('all', None); 'middle 3' -> ('middle', 3);
+    '1,2,5-7' -> ('list', [1, 2, 5, 6, 7]). Rows are numbered 1..n across the plot
+    from the image top (rows running left-right) or left (rows running up-down)."""
+    t = str(text or "").strip().lower()
+    if t in ("", "all", "*"):
+        return "all", None
+    if t.startswith("middle"):
+        try:
+            return "middle", max(1, int(t.split()[-1]))
+        except ValueError:
+            raise ValueError(f"rows '{text}': write e.g. 'middle 3'")
+    ks = set()
+    for part in t.replace(";", ",").split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            a, b = part.split("-", 1)
+            ks.update(range(int(a), int(b) + 1))
+        else:
+            ks.add(int(part))
+    if not ks or min(ks) < 1:
+        raise ValueError(f"rows '{text}': use 'all', 'middle N' or numbers like 1,2,3")
+    return "list", sorted(ks)
+
+
+def _resize(a, ow, oh):
+    """Lanczos resample of a 3 x h x w array to ow x oh, per channel in float, same
+    dtype (8 or 16 bit)."""
+    from PIL import Image
+    top = 255 if a.dtype == np.uint8 else 65535
+    return np.stack([np.asarray(Image.fromarray(c.astype(np.float32), "F")
+                                .resize((ow, oh), Image.LANCZOS))
+                     for c in a]).round().clip(0, top).astype(a.dtype)
+
+
+def _turn_georef(crs, tf, gc, ow):
+    """Georeference of a tile (ow px wide before turning) after np.rot90(.., 1):
+    turned pixel (x, y) is unturned pixel (ow - y, x)."""
+    from rasterio.control import GroundControlPoint
+    from rasterio.transform import Affine
+    if tf is not None:
+        tf = tf * Affine(0, -1, ow, 1, 0, 0)
+    if gc:
+        g, gcrs = gc
+        gc = ([GroundControlPoint(row=ow - p.col, col=p.row, x=p.x, y=p.y, z=p.z)
+               for p in g], gcrs)
+    return crs, tf, gc
+
+
+ROW_TILE_KEYS = ["tile", "rel_path", "plot_stem", "row", "of_rows", "tile_k", "x0", "y0",
+                 "w", "h", "out_w", "out_h", "turned_90", "resampled", "src_mm_px",
+                 "out_mm_px", "tile_len_m", "row_width_m", "row_centre_px", "angle_deg",
+                 "row_lo_px", "row_hi_px", "veg_pct", "src", "bits", "src_bits", "georef"]
+REPORT_KEYS = ["plot_stem", "src", "ok", "reason", "rows_found", "rows_used", "pitch_mm",
+               "angle_deg", "src_mm_px", "row_len_m", "rows_saved", "row_tiles", "veg_mode"]
+
+
+def _write_csv(path, recs, keys):
+    with open(path, "w", newline="") as fh:
+        wr = csv.DictWriter(fh, fieldnames=keys, extrasaction="ignore")
+        wr.writeheader()
+        wr.writerows(recs)
+
+
+def _write_rows_qa(path, small, det, W, boxes):
+    """QA picture: detected rows (row_detect colours) and every row tile written
+    (cyan), labelled with its row number."""
+    import row_detect as rd
+    from PIL import ImageDraw
+    os.makedirs(os.path.dirname(path), exist_ok=True)
+    im = rd.draw_rows(np.transpose(small, (1, 2, 0)), det)
+    sc = im.size[0] / float(W)
+    dr = ImageDraw.Draw(im)
+    for (x, y, w, h, k) in boxes:
+        dr.rectangle([x * sc, y * sc, (x + w) * sc, (y + h) * sc], outline=(0, 230, 255), width=2)
+    for (x, y, w, h, k) in {b[4]: b for b in boxes}.values():
+        dr.text((x * sc + 4, y * sc + 2), f"row {k}", fill=(255, 255, 0))
+    im.save(path, quality=88)
+
+
+def make_row_tiles(src_dir, out_dir, rows="all", rows_per_plot=0, row_pitch_mm=0.0,
+                   plot_width_mm=0.0, save_rows=True, row_tiles=True, tile_len_m=1.0,
+                   row_width_m=0.0, overlap_m=0.0, out_mm_px=0.0, end_margin_m=0.0,
+                   horizontal=True, max_tiles_per_row=0, tiles_pick="spread", seed=7,
+                   fmt="tif", bits="same", compress="lzw", georef=True, link_source=True,
+                   write_qa=True, log=print, progress=None, cancel=None):
+    """Whole crop rows, and tiles of the same ground size along every row.
+
+    rows            'all', 'middle N' or a list such as '1,2,3' (parse_rows).
+    rows_per_plot   sown rows per plot when known (0 = the run of rows found).
+    save_rows       out/<plot>/rows/<plot>_row<k>.<ext>: the whole row, full plot
+                    length, crop pixels inside the row's band (centre +- half a
+                    pitch, following the tilt), 0 outside.
+    row_tiles       out/<plot>/row_tiles/row<k>/<plot>_row<k>_t<j>.<ext>: tiles
+                    tile_len_m long along the row and row_width_m across, centred on
+                    the row line. The row's length is the plot's (crop ends minus the
+                    extraction margin, minus end_margin_m) - no vegetation threshold or
+                    planted-length trim. Tiles are laid end to end (overlap_m) and
+                    centred in that length; only whole tiles.
+    row_width_m     0 = the median row spacing measured over all plots.
+    out_mm_px       output scale; 0 = the median mm/px of the plots. Every row tile
+                    is then exactly tile_len_m / out_mm_px x row_width_m / out_mm_px
+                    pixels on every row of every plot.
+    horizontal      turn row images and tiles 90 deg (lossless) when the rows run
+                    up-down in the crop, so the row always runs left-right.
+    max_tiles_per_row  0 = every tile that fits; else that many per row
+                    ('spread' evenly or 'random').
+    Writes rows_index.csv, row_tiles_index.csv, rows_report.csv and _rows_qa/.
+    Returns dict(rows=..., tiles=..., plots=...)."""
+    import rasterio
+    import rasterio.windows
+    import row_detect as rd
+
+    ext = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "tif": ".tif"}.get(fmt.lower(), ".tif")
+    bits = str(bits).strip().lower() or "same"
+    compress = "none" if str(compress).lower().startswith(("none", "unc")) else "lzw"
+    if ext == ".jpg" and bits == "16":
+        raise ValueError("JPEG is 8-bit only: choose TIFF or PNG for 16-bit output.")
+    if not (save_rows or row_tiles):
+        raise ValueError("Choose whole rows, row tiles or both.")
+    mode, sel = parse_rows(rows)
+    links, _iiq_run, iiq_settings = (_source_links(src_dir) if link_source
+                                     else ({}, {}, ""))
+    os.makedirs(out_dir, exist_ok=True)
+    files = sorted(f for f in os.listdir(src_dir) if f.lower().endswith((".tif", ".tiff")))
+    if not files:
+        log(f"[!] no GeoTIFF crops in {src_dir}")
+        return dict(rows=0, tiles=0, plots=0)
+    # extraction margin per crop: the plot's own ends lie that far inside the crop ends
+    ext_margin = {}
+    for mf in (os.path.join(os.path.dirname(os.path.abspath(src_dir)), "manifest.csv"),
+               os.path.join(src_dir, "manifest.csv")):
+        if os.path.exists(mf):
+            try:
+                with open(mf, newline="", encoding="utf-8") as fh:
+                    for rr in csv.DictReader(fh):
+                        try:
+                            ext_margin[rr.get("raw_file", "")] = float(rr.get("margin_m") or 0)
+                        except ValueError:
+                            pass
+            except Exception:
+                pass
+            break
+    log(f"Rows of {len(files)} plot(s): rows '{rows or 'all'}'"
+        + (f", {rows_per_plot} sown rows per plot" if rows_per_plot else "")
+        + (", whole row images" if save_rows else "")
+        + (f", {tile_len_m:g} m tiles along each row" if row_tiles else "") + ".")
+    _out_desc(log, ext, bits, compress, georef and row_tiles, link_source and row_tiles)
+
+    # ---- pass 1: rows of every plot, ground scale, row length ----------------------
+    plan, report = {}, []
+    for fi, fn in enumerate(files):
+        if cancel is not None and cancel.is_set():
+            log("Cancelled.")
+            return dict(rows=0, tiles=0, plots=0)
+        stem = os.path.splitext(fn)[0]
+        info = dict(plot_stem=stem, src=fn, ok=False, reason="")
+        report.append(info)
+        try:
+            with rasterio.open(os.path.join(src_dir, fn)) as s:
+                W, H = s.width, s.height
+                across_axis = 0 if H < W else 1
+                src_mm = _plot_mm_px(s)
+                if src_mm is None and plot_width_mm > 0:
+                    src_mm = plot_width_mm / float(H if across_axis == 0 else W)
+                dec = max(1, int(round(min(W, H) / 1200.0)))
+                small = to8(s.read([1, 2, 3], out_shape=(3, max(1, H // dec), max(1, W // dec))))
+        except Exception as e:
+            info["reason"] = str(e)
+            log(f"[!] {fn}: {e}")
+            continue
+        sx = W / float(small.shape[2]); sy = H / float(small.shape[1])
+        f = sy if across_axis == 0 else sx                 # across scale small -> full
+        fl = sx if across_axis == 0 else sy                # along scale
+        det = rd.detect_rows(small, across_axis=across_axis,
+                             mm_px=(src_mm * sx) if src_mm else None,
+                             pitch_mm=row_pitch_mm or None, rows_expected=rows_per_plot)
+        info.update(rows_found=len(det.get("plot_rows", [])),
+                    angle_deg=round(det.get("angle_deg", 0.0), 2),
+                    veg_mode=det.get("veg_mode", ""),
+                    src_mm_px=round(src_mm, 4) if src_mm else "")
+        if not det.get("ok"):
+            info["reason"] = det.get("reason", "rows not found")
+            log(f"[!] {fn}: rows not found ({info['reason']}) - skipped")
+            continue
+        if not src_mm:
+            info["reason"] = "no ground scale (not georeferenced; give the plot width)"
+            log(f"[!] {fn}: {info['reason']} - skipped")
+            continue
+        pr = det["plot_rows"]
+        n = len(pr)
+        if mode == "all":
+            ks = list(range(1, n + 1))
+        elif mode == "middle":
+            band = rd.middle_band(det, sel)
+            ks = [pr.index(b) + 1 for b in band[2]] if band else []
+        else:
+            ks = [k for k in sel if k <= n]
+            if len(ks) < len(sel):
+                info["reason"] = f"rows {[k for k in sel if k > n]} not in this plot ({n} rows)"
+        if not ks:
+            info["reason"] = info["reason"] or f"{n} row(s) found, rows '{rows}' asked"
+            log(f"[!] {fn}: {info['reason']} - skipped")
+            continue
+        P = det["pitch_px"]
+        ends = {}
+        for k in ks:
+            c = det["rows"][pr[k - 1]]
+            us = _usable_length(small, across_axis, det, (c - P / 2.0, c + P / 2.0),
+                                src_mm * fl, 1000.0 * ext_margin.get(fn, 0.0), 0.0)
+            e = 1000.0 * max(0.0, end_margin_m) / src_mm
+            ends[k] = (us["q0"] * fl + e, us["q1"] * fl - e)
+        info.update(ok=True, rows_used=" ".join(map(str, ks)),
+                    pitch_mm=round(P * f * src_mm, 1),
+                    row_len_m=round(float(np.median([b - a for a, b in ends.values()]))
+                                    * src_mm / 1000.0, 2))
+        plan[fn] = dict(W=W, H=H, across_axis=across_axis, src_mm=src_mm, det=det, f=f,
+                        fl=fl, ks=ks, ends=ends, info=info,
+                        small=small if write_qa else None)
+        if progress:
+            progress(fi + 1, 2 * len(files))
+    if not plan:
+        log("[!] no plot with rows - nothing written")
+        _write_csv(os.path.join(out_dir, "rows_report.csv"), report, REPORT_KEYS)
+        return dict(rows=0, tiles=0, plots=0)
+
+    gsd = np.array([p["src_mm"] for p in plan.values()])
+    pitches = np.array([p["info"]["pitch_mm"] for p in plan.values()])
+    out_mm = (out_mm_px if out_mm_px > 0 else          # plot nearest the median scale
+              float(gsd[np.argmin(abs(gsd - np.median(gsd)))]))
+    row_w = row_width_m if row_width_m > 0 else round(float(np.median(pitches)) / 1000.0, 3)
+    out_len = max(8, int(round(tile_len_m * 1000.0 / out_mm)))
+    out_wid = max(4, int(round(row_w * 1000.0 / out_mm)))
+    log(f"{len(plan)}/{len(files)} plot(s) with rows; plot images {gsd.min():.3f}-"
+        f"{gsd.max():.3f} mm/px (median {np.median(gsd):.3f}); row spacing "
+        f"{pitches.min():.0f}-{pitches.max():.0f} mm (median {np.median(pitches):.0f}).")
+    if row_tiles:
+        log(f"Row tiles: {tile_len_m:g} m along x {row_w * 1000:.0f} mm across"
+            + (" (median row spacing)" if row_width_m <= 0 else "")
+            + f", output {out_mm:.3f} mm/px -> every tile {out_len} x {out_wid} px"
+            + (" (rows run left-right)" if horizontal else "") + ".")
+
+    # ---- pass 2: write -------------------------------------------------------------
+    rnd = random.Random(seed)
+    row_recs, tile_recs = [], []
+    for fi, fn in enumerate(files):
+        if cancel is not None and cancel.is_set():
+            log("Cancelled.")
+            break
+        p = plan.get(fn)
+        if p is None:
+            continue
+        stem = os.path.splitext(fn)[0]
+        det, f, fl, ks = p["det"], p["f"], p["fl"], p["ks"]
+        W, H, ax, src_mm = p["W"], p["H"], p["across_axis"], p["src_mm"]
+        info = p["info"]
+        pdir = os.path.join(out_dir, stem)
+        qa_boxes = []
+        try:
+            with rasterio.open(os.path.join(src_dir, fn)) as s:
+                if save_rows:
+                    recs = _save_rows(s, W, H, ax, (det, f, fl), os.path.join(pdir, "rows"),
+                                      stem, ext, bits, compress, select=set(ks),
+                                      horizontal=horizontal)
+                    for rc in recs:
+                        rc["rel_path"] = f"{stem}/rows/{rc['file']}"
+                    row_recs.extend(recs)
+                    info["rows_saved"] = len(recs)
+                if row_tiles:
+                    crop_tags = s.tags() if link_source else {}
+                    across_len = H if ax == 0 else W
+                    along_len = W if ax == 0 else H
+                    Li = int(round(tile_len_m * 1000.0 / src_mm))
+                    Wi = int(round(row_w * 1000.0 / src_mm))
+                    stride = max(1, Li - int(round(overlap_m * 1000.0 / src_mm)))
+                    t = math.tan(math.radians(det["angle_deg"])) * (f / fl)
+                    lc = det["along_centre"] * fl
+                    turned = bool(horizontal and ax == 1)
+                    n_written = 0
+                    for k in ks:
+                        c0 = det["rows"][det["plot_rows"][k - 1]] * f
+                        L0, L1 = p["ends"][k]
+                        span = L1 - L0
+                        if span < Li or Wi > across_len:
+                            continue
+                        nt = int((span - Li) // stride) + 1
+                        first = L0 + (span - (Li + (nt - 1) * stride)) / 2.0
+                        starts = [(j, int(round(first + j * stride))) for j in range(nt)]
+                        starts = _pick(starts, max_tiles_per_row, tiles_pick, rnd)
+                        rdir = os.path.join(pdir, "row_tiles", f"row{k}")
+                        for j, l0 in starts:
+                            l0 = max(0, min(l0, along_len - Li))
+                            ac = c0 + t * (l0 + Li / 2.0 - lc)
+                            a0 = int(round(ac - Wi / 2.0))
+                            a0c = max(0, min(a0, across_len - Wi))
+                            if abs(a0c - a0) > 0.25 * Wi:
+                                continue                # the row runs off the crop here
+                            a0 = a0c
+                            x, y, w, h = (l0, a0, Li, Wi) if ax == 0 else (a0, l0, Wi, Li)
+                            a = s.read(window=rasterio.windows.Window(x, y, w, h))
+                            if a.shape[0] < 3:
+                                continue
+                            rgb = a[:3]
+                            v8 = to8(rgb)               # analysis only; rgb is written
+                            valid = v8.max(axis=0) > 4
+                            R, G, B = (v8[i].astype(np.float32) for i in range(3))
+                            veg = (float(((2 * G - R - B)[valid] > 18).mean() * 100)
+                                   if valid.any() else 0.0)
+                            out = convert_bits(rgb, 8 if ext == ".jpg" else bits)
+                            ow, oh = (out_len, out_wid) if ax == 0 else (out_wid, out_len)
+                            resampled = (w, h) != (ow, oh)
+                            if resampled:
+                                out = _resize(out, ow, oh)
+                            crs = tf = gc = None
+                            if georef and ext == ".tif":
+                                crs, tf, gc = _tile_georef(s, x, y, w, h, ow, oh)
+                            if turned:
+                                out = np.ascontiguousarray(np.rot90(out, 1, axes=(1, 2)))
+                                if tf is not None or gc:
+                                    crs, tf, gc = _turn_georef(crs, tf, gc, ow)
+                            lk = (_link_fields(links.get(fn), crop_tags, x, y, w, h,
+                                               iiq_settings) if link_source else {})
+                            tags = None
+                            if link_source and ext == ".tif":
+                                tags = dict(PLOT_IMAGE=fn, PLOT_PIXEL_BOX=f"{x},{y},{w},{h}",
+                                            ROW=f"{k} of {len(det['plot_rows'])}",
+                                            TURNED_90=str(turned),
+                                            SOURCE_IMAGE=lk.get("source_image", ""),
+                                            PIXEL_SOURCE=lk.get("pixel_source", ""),
+                                            SOURCE_PIXEL_BOX=(
+                                                f"{lk['src_photo_x0']},{lk['src_photo_y0']},"
+                                                f"{lk['src_photo_w']},{lk['src_photo_h']}"
+                                                if lk.get("src_photo_x0", "") != "" else ""))
+                            os.makedirs(rdir, exist_ok=True)
+                            name = f"{stem}_row{k}_t{j + 1:02d}{ext}"
+                            write_tile(os.path.join(rdir, name), out, ext, compress,
+                                       crs, tf, gc, tags)
+                            qa_boxes.append((x, y, w, h, k))
+                            n_written += 1
+                            tile_recs.append(dict(
+                                tile=name, rel_path=f"{stem}/row_tiles/row{k}/{name}",
+                                plot_stem=stem, row=k, of_rows=len(det["plot_rows"]),
+                                tile_k=j + 1, x0=x, y0=y, w=w, h=h,
+                                out_w=out.shape[2], out_h=out.shape[1], turned_90=turned,
+                                resampled=resampled, src_mm_px=round(src_mm, 4),
+                                out_mm_px=round(out_mm, 4), tile_len_m=tile_len_m,
+                                row_width_m=row_w, row_centre_px=round(ac, 1),
+                                angle_deg=round(det["angle_deg"], 2),
+                                row_lo_px=int(round(L0)), row_hi_px=int(round(L1)),
+                                veg_pct=round(veg, 2), src=fn,
+                                bits=8 * out.dtype.itemsize, src_bits=8 * rgb.dtype.itemsize,
+                                georef=("affine" if tf is not None else "gcps" if gc else ""),
+                                **lk))
+                    info["row_tiles"] = n_written
+        except Exception as e:
+            info["reason"] = str(e)
+            log(f"[!] {fn}: {e}")
+        if write_qa and p.get("small") is not None:
+            try:
+                _write_rows_qa(os.path.join(out_dir, "_rows_qa", stem + "_rows.jpg"),
+                               p["small"], det, W, qa_boxes)
+            except Exception as e:
+                log(f"[!] {fn}: QA picture: {e}")
+            p["small"] = None
+        if progress:
+            progress(len(files) + fi + 1, 2 * len(files))
+        if (fi + 1) % 25 == 0:
+            log(f"   {fi + 1}/{len(files)} plots, {len(row_recs)} rows, {len(tile_recs)} tiles")
+
+    if row_recs:
+        _write_csv(os.path.join(out_dir, "rows_index.csv"), row_recs, list(row_recs[0].keys()))
+        log(f"Saved {len(row_recs)} whole-row images -> <out>\\<plot>\\rows\\ "
+            "(index rows_index.csv)")
+    if tile_recs:
+        keys = ROW_TILE_KEYS + (["source_image", "pixel_source", "src_photo_x0",
+                                 "src_photo_y0", "src_photo_w", "src_photo_h",
+                                 "iiq_settings", "link_note"] if link_source else [])
+        _write_csv(os.path.join(out_dir, "row_tiles_index.csv"), tile_recs, keys)
+        sz = {(r["out_w"], r["out_h"]) for r in tile_recs}
+        log(f"Saved {len(tile_recs)} row tiles -> <out>\\<plot>\\row_tiles\\row<k>\\ "
+            "(index row_tiles_index.csv)")
+        log(f"Tile size check: pixel sizes {sorted(sz)} "
+            f"({'all the same' if len(sz) == 1 else 'NOT uniform'}); "
+            f"{sum(1 for r in tile_recs if not r['resampled'])} exact copies, "
+            f"{sum(1 for r in tile_recs if r['resampled'])} resampled to {out_mm:.3f} mm/px")
+    _write_csv(os.path.join(out_dir, "rows_report.csv"), report, REPORT_KEYS)
+    plots = len({r["plot_stem"] for r in row_recs} | {r["plot_stem"] for r in tile_recs})
+    log(f"Done: {plots} plot(s) -> {out_dir}; per-plot rows in rows_report.csv"
+        + ("  (pictures in _rows_qa\\)" if write_qa else ""))
+    return dict(rows=len(row_recs), tiles=len(tile_recs), plots=plots,
+                tile_px=[out_len, out_wid] if row_tiles else None,
+                out_mm_px=round(out_mm, 4), row_width_m=row_w)
 
 
 # ---------------------------------------------------------------------------
@@ -902,8 +1388,47 @@ def _out_desc(log, ext, bits, compress, georef, link_source):
         + (", linked to the source photo / IIQ" if link_source else ""))
 
 
+def _recipe_buttons(frame, V, section, log):
+    """'Load recipe...' button: fills the tab's fields from a PlotExtractor_recipe.json."""
+    from tkinter import ttk, filedialog
+    import recipe as rcp
+
+    def load():
+        f = filedialog.askopenfilename(
+            title="Load recipe", filetypes=[("PlotExtractor recipe", "*.json"), ("All", "*.*")])
+        if not f:
+            return
+        vals = rcp.gui_section(f, section)
+        if not vals:
+            log(f"[!] {os.path.basename(f)} has no '{section}' section")
+            return
+        n = rcp.apply_gui(V, vals)
+        log(f"Recipe loaded: {n} setting(s) from {f}")
+    b = ttk.Button(frame, text="Load recipe...", command=load)
+    b.pack(side="left", padx=(12, 0))
+    return b
+
+
+def _gui_values(V):
+    return {k: v.get() for k, v in V.items()}
+
+
 def build_tiles_tab(parent, defaults=None):
-    """The 'Training tiles' tab: cut tiles, and put labelled tiles back together.
+    """Tab 6: two sub-tabs - 6a plot tiles (fixed ground size) and 6b rows and row
+    tiles."""
+    from tkinter import ttk
+    nb = ttk.Notebook(parent)
+    a = ttk.Frame(nb)
+    b = ttk.Frame(nb)
+    nb.add(a, text="6a  Plot tiles (fixed ground size)")
+    nb.add(b, text="6b  Rows and row tiles")
+    _build_plot_tiles_tab(a, defaults).pack(fill="both", expand=True)
+    _build_row_tiles_tab(b, defaults).pack(fill="both", expand=True)
+    return nb
+
+
+def _build_plot_tiles_tab(parent, defaults=None):
+    """Tab 6a: cut fixed-size ground tiles, and put labelled tiles back together.
 
     Self-contained - its own log and progress, so it does not depend on the
     extract tab being visible. Long jobs run on a worker thread.
@@ -923,8 +1448,8 @@ def build_tiles_tab(parent, defaults=None):
     V = {
         "src": tk.StringVar(value=d.get("src", "")),
         "out": tk.StringVar(value=d.get("out", "")),
-        "tile": tk.StringVar(value=str(d.get("tile", 1024))),
-        "overlap": tk.StringVar(value=str(d.get("overlap", 256))),
+        "tile_m": tk.StringVar(value=str(d.get("tile_m", 1.0))),
+        "overlap_m": tk.StringVar(value=str(d.get("overlap_m", 0.0))),
         "rows_only": tk.BooleanVar(value=bool(d.get("rows_only", True))),
         "pitch": tk.StringVar(value=str(d.get("pitch", ""))),
         "plotw": tk.StringVar(value=str(d.get("plotw", ""))),
@@ -938,11 +1463,9 @@ def build_tiles_tab(parent, defaults=None):
         "mid_on": tk.BooleanVar(value=bool(d.get("mid_on", False))),
         "mid_n": tk.StringVar(value=str(d.get("mid_n", 3))),
         "mid_rows": tk.StringVar(value=str(d.get("mid_rows", 0))),
-        "mid_band": tk.BooleanVar(value=bool(d.get("mid_band", True))),
         "mid_qa": tk.BooleanVar(value=bool(d.get("mid_qa", True))),
         "mid_pick": tk.StringVar(value=d.get("mid_pick", "random")),
         "mid_end": tk.StringVar(value=str(d.get("mid_end", 0.5))),
-        "mid_saverows": tk.BooleanVar(value=bool(d.get("mid_saverows", False))),
         "bits": tk.StringVar(value=str(d.get("bits", BITS_CHOICES[0]))),
         "compress": tk.StringVar(value=d.get("compress", COMPRESS_CHOICES[0])),
         "georef": tk.BooleanVar(value=bool(d.get("georef", True))),
@@ -972,7 +1495,7 @@ def build_tiles_tab(parent, defaults=None):
                 row=r, column=1, sticky="w", padx=6)
         r += 1
 
-    ttk.Label(frm, text="Cut plot crops into tiles",
+    ttk.Label(frm, text="Cut plot crops into tiles of a fixed ground size",
               font=("", 10, "bold")).grid(row=r, column=0, columnspan=3, sticky="w")
     r += 1
     path_row("Plot crops folder *", V["src"], "dir",
@@ -983,8 +1506,8 @@ def build_tiles_tab(parent, defaults=None):
     o1 = ttk.Frame(frm)
     o1.grid(row=r, column=0, columnspan=3, sticky="w", pady=4)
     r += 1
-    for text, var, w in (("Tile size (px):", V["tile"], 6),
-                         ("Overlap (px):", V["overlap"], 6),
+    for text, var, w in (("Tile size (m):", V["tile_m"], 6),
+                         ("Overlap (m):", V["overlap_m"], 6),
                          ("Seed:", V["seed"], 4)):
         ttk.Label(o1, text=text).pack(side="left", padx=(0, 4))
         ttk.Entry(o1, textvariable=var, width=w).pack(side="left", padx=(0, 12))
@@ -1053,8 +1576,6 @@ def build_tiles_tab(parent, defaults=None):
         side="left", padx=(0, 4))
     ttk.Spinbox(o2m, from_=0, to=24, textvariable=V["mid_rows"], width=3).pack(
         side="left", padx=(0, 12))
-    ttk.Checkbutton(o2m, text="square tiles spanning the band",
-                    variable=V["mid_band"]).pack(side="left", padx=(0, 12))
     ttk.Checkbutton(o2m, text="QA pictures", variable=V["mid_qa"]).pack(side="left")
     o2n = ttk.Frame(frm)
     o2n.grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, 4))
@@ -1062,11 +1583,11 @@ def build_tiles_tab(parent, defaults=None):
     ttk.Label(o2n, text="      keep tiles").pack(side="left", padx=(0, 4))
     ttk.Entry(o2n, textvariable=V["mid_end"], width=5).pack(side="left", padx=(0, 4))
     ttk.Label(o2n, text="m from the plot ends").pack(side="left", padx=(0, 16))
-    ttk.Checkbutton(o2n, text="also save each row as its own image (Rows\\<plot>\\)",
-                    variable=V["mid_saverows"]).pack(side="left")
+    ttk.Label(o2n, text="(whole rows and row tiles: tab 6b)",
+              foreground="grey").pack(side="left")
     ttk.Label(frm, text="rows are detected in every plot (PhenoFuse row detection, "
                         "tilt-aware, works on raw and rectified crops); the band "
-                        "holds exactly the N central rows. Along the plot, tiles "
+                        "is centred on the N central rows. Along the plot, tiles "
                         "stay inside the planted length, the set distance away "
                         "from the bare plot ends, and are centred there; 'tiles "
                         "per plot' then takes that many (random, or 'spread' = "
@@ -1081,11 +1602,13 @@ def build_tiles_tab(parent, defaults=None):
     o2b = ttk.Frame(frm)
     o2b.grid(row=r, column=0, columnspan=3, sticky="w", pady=4)
     r += 1
-    ttk.Label(o2b, text="Fix tile ground scale (mm/px):").pack(side="left", padx=(0, 4))
+    ttk.Label(o2b, text="Output scale (mm/px):").pack(side="left", padx=(0, 4))
     ttk.Entry(o2b, textvariable=V["mmpx"], width=7).pack(side="left")
-    ttk.Label(frm, text="blank = tile is N source pixels, so it covers different "
-                        "ground on each plot. Set it (e.g. 0.40) and every tile "
-                        "covers the same real area: tile px x mm/px.",
+    ttk.Label(frm, text="every tile covers the same ground (tile size x tile size m) AND "
+                        "has the same pixel size on every plot: tile m / mm/px. Blank = "
+                        "the median mm/px of the plot images; plots at that scale are "
+                        "exact copies, the others are resampled (Lanczos). Only whole "
+                        "tiles are written.",
               foreground="grey").grid(row=r, column=0, columnspan=3, sticky="w")
     r += 1
 
@@ -1113,6 +1636,9 @@ def build_tiles_tab(parent, defaults=None):
     cancel_btn.pack(side="left", padx=8)
     prog = ttk.Progressbar(btn1, mode="determinate", length=260)
     prog.pack(side="left", padx=8)
+    _recipe_buttons(btn1, V, "plot_tiles", lambda m: put(m))
+    ttk.Label(btn1, text="each run writes its settings to PlotExtractor_recipe.json "
+                         "in the output folder", foreground="grey").pack(side="left", padx=8)
 
     ttk.Separator(frm, orient="horizontal").grid(
         row=r, column=0, columnspan=3, sticky="ew", pady=8)
@@ -1178,13 +1704,16 @@ def build_tiles_tab(parent, defaults=None):
             messagebox.showwarning("Make tiles",
                                    "The output folder must not be the crops folder.")
             return
-        t = int(_f(V["tile"], 1024)); ov = int(_f(V["overlap"], 0))
-        if ov >= t:
+        tm = _f(V["tile_m"], 1.0); om = _f(V["overlap_m"], 0.0)
+        if tm <= 0:
+            messagebox.showwarning("Make tiles", "Tile size must be more than 0 m.")
+            return
+        if om >= tm:
             messagebox.showwarning("Make tiles",
                                    "Overlap must be smaller than the tile size.")
             return
-        start(lambda: make_tiles(
-            src, out, tile=t, overlap=ov,
+        kw = dict(
+            tile_m=tm, overlap_m=om,
             rows_only=bool(V["rows_only"].get()),
             row_pitch_mm=_f(V["pitch"], 0.0), plot_width_mm=_f(V["plotw"], 0.0),
             fmt=V["fmt"].get(), min_veg_pct=_f(V["minveg"], 0.0),
@@ -1194,14 +1723,26 @@ def build_tiles_tab(parent, defaults=None):
             per_plot_dirs=bool(V["subdirs"].get()),
             middle_rows=(int(_f(V["mid_n"], 3)) if V["mid_on"].get() else 0),
             rows_per_plot=int(_f(V["mid_rows"], 0)),
-            band_tile=bool(V["mid_band"].get()), write_qa=bool(V["mid_qa"].get()),
+            band_tile=False, write_qa=bool(V["mid_qa"].get()),
             end_margin_m=_f(V["mid_end"], 0.5), tiles_pick=V["mid_pick"].get() or "random",
-            save_rows=bool(V["mid_saverows"].get()),
+            save_rows=False,
             bits=bits_key(V["bits"].get()),
             compress="none" if V["compress"].get().lower().startswith("none") else "lzw",
-            georef=bool(V["georef"].get()), link_source=bool(V["link"].get()),
-            log=put,
-            progress=lambda a, b: q.put(("prog", (a, b))), cancel=cancel_ev))
+            georef=bool(V["georef"].get()), link_source=bool(V["link"].get()))
+        gui = _gui_values(V)
+
+        def job():
+            import recipe as rcp
+            prm = dict(src_dir=src, out_dir=out, **kw)
+            rcp.write_recipe(out, "plot_tiles", gui=gui, params=prm, src_dir=src)
+            n, plots, idx = make_tiles(src, out, log=put,
+                                       progress=lambda a, b: q.put(("prog", (a, b))),
+                                       cancel=cancel_ev, **kw)
+            rcp.write_recipe(out, "plot_tiles", gui=gui, params=prm,
+                             results=dict(tiles=n, plots=plots, index=idx,
+                                          cancelled=cancel_ev.is_set()),
+                             src_dir=src, log=put)
+        start(job)
 
     def on_stitch():
         src = V["stitch_in"].get().strip() or V["out"].get().strip()
@@ -1247,6 +1788,287 @@ def build_tiles_tab(parent, defaults=None):
         frm.after(150, poll)
 
     poll()
+    frm._pe_vars = V
+    return frm
+
+
+def _build_row_tiles_tab(parent, defaults=None):
+    """Tab 6b: whole crop rows (all, middle N or chosen rows) and tiles of one ground
+    size along each row, written per plot:
+        <out>/<plot>/rows/<plot>_row<k>.<ext>
+        <out>/<plot>/row_tiles/row<k>/<plot>_row<k>_t<j>.<ext>"""
+    import queue
+    import threading
+    import tkinter as tk
+    from tkinter import ttk, filedialog, messagebox
+
+    d = defaults or {}
+    frm = ttk.Frame(parent, padding=10)
+    frm.columnconfigure(1, weight=1)
+    q = queue.Queue()
+    cancel_ev = threading.Event()
+    busy = {"on": False}
+    out0 = d.get("out", "")
+    V = {
+        "src": tk.StringVar(value=d.get("src", "")),
+        "out": tk.StringVar(value=(os.path.join(os.path.dirname(out0), "Rows")
+                                   if out0 else "")),
+        "rows": tk.StringVar(value="all"),
+        "rows_per_plot": tk.StringVar(value="0"),
+        "pitch": tk.StringVar(value=str(d.get("pitch", ""))),
+        "plotw": tk.StringVar(value=str(d.get("plotw", ""))),
+        "save_rows": tk.BooleanVar(value=True),
+        "horizontal": tk.BooleanVar(value=True),
+        "row_tiles": tk.BooleanVar(value=True),
+        "tile_len": tk.StringVar(value="1.0"),
+        "row_w": tk.StringVar(value=""),
+        "overlap_m": tk.StringVar(value="0"),
+        "end_m": tk.StringVar(value="0"),
+        "ntiles": tk.StringVar(value="0"),
+        "pick": tk.StringVar(value="spread"),
+        "mmpx": tk.StringVar(value=""),
+        "fmt": tk.StringVar(value="tif"),
+        "bits": tk.StringVar(value=BITS_CHOICES[0]),
+        "compress": tk.StringVar(value=COMPRESS_CHOICES[0]),
+        "georef": tk.BooleanVar(value=True),
+        "link": tk.BooleanVar(value=True),
+        "qa": tk.BooleanVar(value=True),
+        "seed": tk.StringVar(value="7"),
+    }
+    r = 0
+
+    def path_row(label, var, hint=""):
+        nonlocal r
+        ttk.Label(frm, text=label).grid(row=r, column=0, sticky="w", pady=3)
+        ttk.Entry(frm, textvariable=var).grid(row=r, column=1, sticky="ew", padx=6)
+
+        def browse():
+            v = filedialog.askdirectory()
+            if v:
+                var.set(v)
+        ttk.Button(frm, text="Browse...", command=browse).grid(row=r, column=2)
+        if hint:
+            r += 1
+            ttk.Label(frm, text=hint, foreground="grey").grid(
+                row=r, column=1, sticky="w", padx=6)
+        r += 1
+
+    def line(pady=4):
+        nonlocal r
+        f = ttk.Frame(frm)
+        f.grid(row=r, column=0, columnspan=3, sticky="w", pady=pady)
+        r += 1
+        return f
+
+    def note(text):
+        nonlocal r
+        ttk.Label(frm, text=text, foreground="grey", wraplength=900, justify="left").grid(
+            row=r, column=0, columnspan=3, sticky="w")
+        r += 1
+
+    def field(f, text, var, w=6, after=""):
+        ttk.Label(f, text=text).pack(side="left", padx=(0, 4))
+        ttk.Entry(f, textvariable=var, width=w).pack(side="left", padx=(0, 4))
+        if after:
+            ttk.Label(f, text=after).pack(side="left", padx=(0, 12))
+        else:
+            ttk.Frame(f, width=8).pack(side="left")
+
+    ttk.Label(frm, text="Extract whole rows, and tiles of a fixed ground size along each row",
+              font=("", 10, "bold")).grid(row=r, column=0, columnspan=3, sticky="w")
+    r += 1
+    path_row("Plot crops folder *", V["src"],
+             "the RawCrops folder of an extraction (GeoTIFF/TIFF; raw or rectified)")
+    path_row("Output folder *", V["out"],
+             "one folder per plot: <plot>\\rows\\ and <plot>\\row_tiles\\row<k>\\")
+
+    f = line()
+    ttk.Label(f, text="Rows:", font=("", 9, "bold")).pack(side="left", padx=(0, 4))
+    ttk.Combobox(f, textvariable=V["rows"], width=12,
+                 values=["all", "middle 3", "middle 1", "1", "1,2", "1,2,3", "2,3,4"]).pack(
+        side="left", padx=(0, 6))
+    ttk.Label(f, text="('all', 'middle N', or row numbers such as 1,2,3 or 2-4)",
+              foreground="grey").pack(side="left", padx=(0, 12))
+    ttk.Label(f, text="sown rows per plot (0 = detect):").pack(side="left", padx=(0, 4))
+    ttk.Spinbox(f, from_=0, to=24, textvariable=V["rows_per_plot"], width=3).pack(side="left")
+    f = line()
+    field(f, "row spacing (mm):", V["pitch"], 6)
+    field(f, "plot width (mm):", V["plotw"], 7)
+    note("Rows are found in every plot (PhenoFuse row detection, tilt-aware, raw and "
+         "rectified crops) and numbered 1..n across the plot from the image top (or left "
+         "when the rows run up-down). Give the sown rows per plot when known: it decides "
+         "which rows count when the grid clips an outer row. Spacing and width only set "
+         "the search scale (blank = guess).")
+
+    f = line()
+    ttk.Checkbutton(f, text="Save each chosen row as a whole image (<plot>\\rows\\)",
+                    variable=V["save_rows"]).pack(side="left", padx=(0, 16))
+    ttk.Checkbutton(f, text="Turn so the row runs left-right (lossless 90 deg)",
+                    variable=V["horizontal"]).pack(side="left")
+    note("A whole row is the full plot length; the row's own band (centre +- half the "
+         "spacing, following the tilt) holds the crop's pixels unchanged, outside it is 0.")
+
+    f = line()
+    ttk.Checkbutton(f, text="Make row tiles:", variable=V["row_tiles"]).pack(
+        side="left", padx=(0, 8))
+    field(f, "tile length along the row (m):", V["tile_len"], 5)
+    field(f, "tile width across (m):", V["row_w"], 6, "(blank = median row spacing)")
+    f = line()
+    ttk.Label(f, text="      ").pack(side="left")
+    field(f, "overlap (m):", V["overlap_m"], 5)
+    field(f, "keep tiles", V["end_m"], 5, "m from the plot ends")
+    ttk.Label(f, text="tiles per row:").pack(side="left", padx=(0, 4))
+    ttk.Spinbox(f, from_=0, to=100, textvariable=V["ntiles"], width=4).pack(
+        side="left", padx=(0, 4))
+    ttk.Label(f, text="(0 = all)").pack(side="left", padx=(0, 8))
+    ttk.Combobox(f, textvariable=V["pick"], width=8, state="readonly",
+                 values=["spread", "random"]).pack(side="left")
+    f = line()
+    ttk.Label(f, text="      ").pack(side="left")
+    field(f, "Output scale (mm/px):", V["mmpx"], 7, "(blank = median of the plots)")
+    note("Each row tile is centred on its row line and has the same ground size and the "
+         "same pixel size on every row of every plot (length / mm/px x width / mm/px). "
+         "The row length is the plot's: crop ends minus the extraction margin (and the "
+         "'keep' distance) - no vegetation threshold or planted-length trim. Tiles are "
+         "laid end to end and centred along the row; only whole tiles are written.")
+
+    f = line()
+    ttk.Label(f, text="Format:").pack(side="left", padx=(0, 4))
+    ttk.Combobox(f, textvariable=V["fmt"], width=6, state="readonly",
+                 values=["tif", "png", "jpeg"]).pack(side="left", padx=(0, 12))
+    ttk.Label(f, text="Bits:").pack(side="left", padx=(0, 4))
+    ttk.Combobox(f, textvariable=V["bits"], width=28, state="readonly",
+                 values=BITS_CHOICES).pack(side="left", padx=(0, 12))
+    ttk.Label(f, text="TIFF compression:").pack(side="left", padx=(0, 4))
+    ttk.Combobox(f, textvariable=V["compress"], width=22, state="readonly",
+                 values=COMPRESS_CHOICES).pack(side="left")
+    f = line()
+    ttk.Checkbutton(f, text="Georeference row tiles", variable=V["georef"]).pack(
+        side="left", padx=(0, 12))
+    ttk.Checkbutton(f, text="Link to the source photo / IIQ", variable=V["link"]).pack(
+        side="left", padx=(0, 12))
+    ttk.Checkbutton(f, text="QA pictures (_rows_qa\\)", variable=V["qa"]).pack(
+        side="left", padx=(0, 12))
+    field(f, "Seed:", V["seed"], 4)
+
+    f = line(6)
+    run_btn = ttk.Button(f, text="Extract rows")
+    run_btn.pack(side="left")
+    cancel_btn = ttk.Button(f, text="Cancel", state="disabled")
+    cancel_btn.pack(side="left", padx=8)
+    prog = ttk.Progressbar(f, mode="determinate", length=260)
+    prog.pack(side="left", padx=8)
+
+    box = tk.Text(frm, height=12, wrap="none", state="disabled", font=("Consolas", 9))
+
+    def put(m):
+        q.put(("log", str(m)))
+    _recipe_buttons(f, V, "rows_and_row_tiles", put)
+    ttk.Label(f, text="each run writes its settings to PlotExtractor_recipe.json",
+              foreground="grey").pack(side="left", padx=8)
+
+    box.grid(row=r, column=0, columnspan=3, sticky="nsew")
+    frm.rowconfigure(r, weight=1)
+    sb = ttk.Scrollbar(frm, command=box.yview)
+    sb.grid(row=r, column=3, sticky="ns")
+    box.configure(yscrollcommand=sb.set)
+
+    def _f(var, default=0.0):
+        try:
+            return float(str(var.get()).strip() or default)
+        except (TypeError, ValueError):
+            return default
+
+    def on_run():
+        if busy["on"]:
+            return
+        src, out = V["src"].get().strip(), V["out"].get().strip()
+        if not (src and os.path.isdir(src)):
+            messagebox.showwarning("Extract rows", "Choose the plot crops folder.")
+            return
+        if not out:
+            messagebox.showwarning("Extract rows", "Choose an output folder.")
+            return
+        if os.path.abspath(src) == os.path.abspath(out):
+            messagebox.showwarning("Extract rows",
+                                   "The output folder must not be the crops folder.")
+            return
+        try:
+            parse_rows(V["rows"].get())
+        except ValueError as e:
+            messagebox.showwarning("Extract rows", str(e))
+            return
+        if not (V["save_rows"].get() or V["row_tiles"].get()):
+            messagebox.showwarning("Extract rows", "Choose whole rows, row tiles or both.")
+            return
+        tl, om = _f(V["tile_len"], 1.0), _f(V["overlap_m"], 0.0)
+        if V["row_tiles"].get() and (tl <= 0 or om >= tl):
+            messagebox.showwarning("Extract rows",
+                                   "Tile length must be > 0 and longer than the overlap.")
+            return
+        kw = dict(rows=V["rows"].get().strip() or "all",
+                  rows_per_plot=int(_f(V["rows_per_plot"], 0)),
+                  row_pitch_mm=_f(V["pitch"], 0.0), plot_width_mm=_f(V["plotw"], 0.0),
+                  save_rows=bool(V["save_rows"].get()), row_tiles=bool(V["row_tiles"].get()),
+                  tile_len_m=tl, row_width_m=_f(V["row_w"], 0.0), overlap_m=om,
+                  out_mm_px=_f(V["mmpx"], 0.0), end_margin_m=_f(V["end_m"], 0.0),
+                  horizontal=bool(V["horizontal"].get()),
+                  max_tiles_per_row=max(0, int(_f(V["ntiles"], 0))),
+                  tiles_pick=V["pick"].get() or "spread", seed=int(_f(V["seed"], 7)),
+                  fmt=V["fmt"].get(), bits=bits_key(V["bits"].get()),
+                  compress="none" if V["compress"].get().lower().startswith("none") else "lzw",
+                  georef=bool(V["georef"].get()), link_source=bool(V["link"].get()),
+                  write_qa=bool(V["qa"].get()))
+        gui = _gui_values(V)
+        busy["on"] = True
+        cancel_ev.clear()
+        run_btn.configure(state="disabled")
+        cancel_btn.configure(state="normal")
+        prog["value"] = 0
+
+        def job():
+            import recipe as rcp
+            prm = dict(src_dir=src, out_dir=out, **kw)
+            try:
+                rcp.write_recipe(out, "rows_and_row_tiles", gui=gui, params=prm, src_dir=src)
+                res = make_row_tiles(src, out, log=put,
+                                     progress=lambda a, b: q.put(("prog", (a, b))),
+                                     cancel=cancel_ev, **kw)
+                res["cancelled"] = cancel_ev.is_set()
+                rcp.write_recipe(out, "rows_and_row_tiles", gui=gui, params=prm,
+                                 results=res, src_dir=src, log=put)
+            except Exception as e:
+                put("[!] " + str(e))
+            q.put(("done", None))
+        threading.Thread(target=job, daemon=True).start()
+
+    run_btn.configure(command=on_run)
+    cancel_btn.configure(command=lambda: (cancel_ev.set(), put("cancelling...")))
+
+    def poll():
+        try:
+            while True:
+                kind, payload = q.get_nowait()
+                if kind == "log":
+                    box.configure(state="normal")
+                    box.insert("end", payload + "\n")
+                    box.see("end")
+                    box.configure(state="disabled")
+                elif kind == "prog":
+                    a, b = payload
+                    prog["maximum"] = b
+                    prog["value"] = a
+                elif kind == "done":
+                    busy["on"] = False
+                    run_btn.configure(state="normal")
+                    cancel_btn.configure(state="disabled")
+        except queue.Empty:
+            pass
+        frm.after(150, poll)
+
+    poll()
+    frm._pe_vars = V
+    frm._pe_run = on_run
     return frm
 
 
