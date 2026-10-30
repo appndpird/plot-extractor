@@ -354,30 +354,51 @@ def _pick(cand, n, how, rnd):
     return sorted(rnd.sample(cand, n))
 
 
+def _small_copy(s, W, H):
+    """8-bit reduced copy (shorter side ~1200 px) used for row detection and QA."""
+    dec = max(1, int(round(min(W, H) / 1200.0)))
+    return to8(s.read([1, 2, 3], out_shape=(3, max(1, H // dec), max(1, W // dec))))
+
+
+def _detect_plot(s, W, H, across_axis, src_mm, row_pitch_mm, rows_expected, small=None,
+                 det=None):
+    """Rows of one plot on a reduced copy: (small, det, f, fl); f / fl = across /
+    along scale from the reduced copy to the crop. det: an earlier detection of the
+    same copy (it is then only re-read, not re-detected)."""
+    import row_detect as rd
+    if small is None:
+        small = _small_copy(s, W, H)
+    sx = W / float(small.shape[2]); sy = H / float(small.shape[1])
+    if det is None:
+        det = rd.detect_rows(small, across_axis=across_axis,
+                             mm_px=(src_mm * sx) if src_mm else None,
+                             pitch_mm=row_pitch_mm or None, rows_expected=rows_expected)
+    f = sy if across_axis == 0 else sx
+    fl = sx if across_axis == 0 else sy
+    return small, det, f, fl
+
+
 def _middle_row_cands(s, W, H, across_axis, n_middle, rows_expected, src_mm,
                       row_pitch_mm, band_tile, win_px, overlap, qa_path=None,
-                      ext_margin_mm=0.0, end_margin_mm=500.0, strict=False):
+                      ext_margin_mm=0.0, end_margin_mm=500.0, strict=False,
+                      win_across=None, det_in=None):
     """Tile candidates covering the n_middle central crop rows of one plot.
 
     Rows are found with row_detect (the PhenoFuse RGB row detection) on a reduced
     copy of the crop; the band of the middle rows follows the rows' tilt, so it also
     works on unrectified raw crops. band_tile: square tiles whose side is the band
     width, laid end to end along the plot (native pixels, no overlap); otherwise
-    win_px tiles centred on the band. Along the plot the tiles stay inside the
-    usable length (_usable_length: away from the bare plot ends by end_margin_mm)
-    and are centred in it. strict: the tile size is fixed (ground tiles); a plot
-    narrower than one tile gets none instead of a smaller tile.
+    tiles win_px along x win_across across (default square) centred on the band.
+    Along the plot the tiles stay inside the usable length (_usable_length: away
+    from the bare plot ends by end_margin_mm) and are centred in it. strict: the
+    tile size is fixed (ground tiles); a plot narrower than one tile gets none
+    instead of a smaller tile. det_in: (small, det, f, fl) from _detect_plot.
 
-    Returns (cand, info): cand = [(col, row, x, y, side)], info = per-plot report."""
+    Returns (cand, info): cand = [(col, row, x, y, w, h)], info = per-plot report;
+    info['_qa'] is set on every path when qa_path is given (skipped plots too)."""
     import row_detect as rd
-    dec = max(1, int(round(min(W, H) / 1200.0)))
-    small = to8(s.read([1, 2, 3], out_shape=(3, max(1, H // dec), max(1, W // dec))))
-    sx = W / float(small.shape[2]); sy = H / float(small.shape[1])
-    det = rd.detect_rows(small, across_axis=across_axis,
-                         mm_px=(src_mm * sx) if src_mm else None,
-                         pitch_mm=row_pitch_mm or None, rows_expected=rows_expected)
-    f = sy if across_axis == 0 else sx                 # across scale small -> full
-    fl = sx if across_axis == 0 else sy                # along scale
+    small, det, f, fl = det_in or _detect_plot(s, W, H, across_axis, src_mm,
+                                               row_pitch_mm, rows_expected)
     info = dict(ok=det.get("ok", False), reason=det.get("reason", ""),
                 rows_found=len(det.get("plot_rows", [])),
                 rows_present=det.get("n_rows_present", 0),
@@ -387,28 +408,43 @@ def _middle_row_cands(s, W, H, across_axis, n_middle, rows_expected, src_mm,
                 angle_deg=round(det.get("angle_deg", 0.0), 2), band_lo="", band_hi="",
                 veg_mode=det.get("veg_mode", ""),
                 middle_rows="")
+    qa = dict(path=qa_path, small=small, det=det, band=None, us=None, fl=fl)
+    info["_qa"] = qa if qa_path else None
     if not det.get("ok"):
+        info["reason"] = info["reason"] or "rows not found"
         return [], info
     info["_det"] = (det, f, fl)
     band = rd.middle_band(det, n_middle)
     if band is None:
         info["reason"] = (f"only {len(det['plot_rows'])} row(s) found, "
                           f"{n_middle} middle rows asked")
-        if qa_path:
-            rd.draw_rows(np.transpose(small, (1, 2, 0)), det).save(qa_path, quality=88)
         return [], info
+    qa["band"] = band
     lo, hi, blk = band[0] * f, band[1] * f, band[2]
     info["_det"] = (det, f, fl, blk)
     k0 = det["plot_rows"].index(blk[0])
     info.update(band_lo=int(lo), band_hi=int(hi),
                 middle_rows=f"{k0 + 1}-{k0 + len(blk)} of {len(det['plot_rows'])}")
+    if src_mm:
+        info["band_mm"] = round((hi - lo) * src_mm, 1)
     across_len = H if across_axis == 0 else W
     along_len = W if across_axis == 0 else H
-    side = int(round(hi - lo)) if band_tile else int(win_px)
-    if strict and side > across_len:
-        info["reason"] = f"plot is {across_len} px across, one tile is {side} px"
+    if band_tile:
+        side = across = int(round(hi - lo))
+    else:
+        side = int(win_px)                             # along
+        across = int(win_across or win_px)
+    if src_mm:
+        info["tile_across_mm"] = round(across * src_mm, 1)
+    info["rows_covered"] = bool(hi - lo <= across + 1)
+    if strict and (across > across_len or side > along_len):
+        info["reason"] = (f"plot is {across_len} px across, one tile is {across} px"
+                          if across > across_len else
+                          f"plot is {along_len} px long, one tile is {side} px")
         return [], info
-    side = max(8, min(side, across_len))
+    if not strict:
+        side = max(8, min(side, across_len))
+        across = side if (band_tile or not win_across) else max(8, min(across, across_len))
     stride = side if band_tile else max(1, side - max(0, overlap))
     # the rows may be tilted in a raw (unrectified) crop: the band centre moves
     # across by tan(angle) per pixel along (angle measured in the reduced copy)
@@ -418,6 +454,7 @@ def _middle_row_cands(s, W, H, across_axis, n_middle, rows_expected, src_mm,
     # along the plot: only the usable length, tiles centred in it
     us = _usable_length(small, across_axis, det, band,
                         (src_mm * fl) if src_mm else None, ext_margin_mm, end_margin_mm)
+    qa["us"] = us
     u0, u1 = us["u0"] * fl, us["u1"] * fl
     span = u1 - u0
     if band_tile:
@@ -444,25 +481,41 @@ def _middle_row_cands(s, W, H, across_axis, n_middle, rows_expected, src_mm,
         l0 = max(0, min(l0, along_len - side))
         mid_along = l0 + side / 2.0
         a_c = centre0 + t * (mid_along - lc_full) * (f / fl)
-        a0 = int(round(a_c - side / 2.0))
-        a0 = max(0, min(a0, across_len - side))
-        x, y = (l0, a0) if across_axis == 0 else (a0, l0)
-        cand.append((c_i, 0, x, y, side))
+        a0 = int(round(a_c - across / 2.0))
+        a0 = max(0, min(a0, across_len - across))
+        x, y, w, h = ((l0, a0, side, across) if across_axis == 0
+                      else (a0, l0, across, side))
+        cand.append((c_i, 0, x, y, w, h))
     if not cand:
         info["reason"] = (f"usable length {max(0.0, span) * mm / 1000.0:.2f} m is shorter "
                           "than one tile" if mm else "usable length shorter than one tile")
-    info["_qa"] = (qa_path, small, det, band, us, fl) if qa_path else None
     return cand, info
 
 
-def _write_middle_qa(qa, W, H, across_axis, cand_all, cand_kept):
-    """QA picture: rows (green), middle band (yellow), plot ends (grey), usable
-    length limits (orange), candidate tiles (thin blue) and the tiles written
-    (thick cyan, numbered)."""
+def _qa_font(size):
+    from PIL import ImageFont
+    for name in ("arialbd.ttf", "arial.ttf", "DejaVuSans-Bold.ttf"):
+        try:
+            return ImageFont.truetype(name, size)
+        except Exception:
+            pass
+    return ImageFont.load_default()
+
+
+def _write_middle_qa(qa, W, H, across_axis, cand_all, cand_kept, note=""):
+    """QA picture of one plot: rows (green), middle band (yellow), plot ends (grey),
+    usable length limits (orange), candidate tiles (thin blue) and the tiles written
+    (thick cyan, numbered). A plot without tiles still gets its picture, with the
+    reason written on it. Also used for the plain grid (no rows: det None)."""
     import row_detect as rd
-    from PIL import ImageDraw
-    qa_path, small, det, band, us, fl = qa
-    im = rd.draw_rows(np.transpose(small, (1, 2, 0)), det, band=band)
+    from PIL import Image, ImageDraw
+    small, det, band, us, fl = qa["small"], qa["det"], qa["band"], qa["us"], qa["fl"]
+    rgb = np.transpose(small, (1, 2, 0))
+    im = (rd.draw_rows(rgb, det, band=band) if det is not None
+          else Image.fromarray(np.ascontiguousarray(rgb)))
+    if det is None and max(im.size) > 1600:
+        k = 1600.0 / max(im.size)
+        im = im.resize((max(1, int(im.size[0] * k)), max(1, int(im.size[1] * k))))
     sc = im.size[0] / float(W)
     dr = ImageDraw.Draw(im)
 
@@ -472,20 +525,36 @@ def _write_middle_qa(qa, W, H, across_axis, cand_all, cand_kept):
             dr.line([(v, 0), (v, im.size[1])], fill=col, width=width)
         else:
             dr.line([(0, v), (im.size[0], v)], fill=col, width=width)
-    across_line(us["p0"], (150, 150, 150), 2)
-    across_line(us["p1"], (150, 150, 150), 2)
-    across_line(us["u0"], (255, 140, 0), 3)
-    across_line(us["u1"], (255, 140, 0), 3)
-    kept = set((x, y) for (_c, _r, x, y, _s) in cand_kept)
-    for (_c, _r, x, y, sd) in cand_all:
+    if us:
+        across_line(us["p0"], (150, 150, 150), 2)
+        across_line(us["p1"], (150, 150, 150), 2)
+        across_line(us["u0"], (255, 140, 0), 3)
+        across_line(us["u1"], (255, 140, 0), 3)
+    if qa.get("lohi"):                                   # plain grid: the tiled band
+        lo, hi = qa["lohi"]
+        for v in (lo, hi):
+            v = v * sc
+            if across_axis == 0:
+                dr.line([(0, v), (im.size[0], v)], fill=(255, 210, 0), width=2)
+            else:
+                dr.line([(v, 0), (v, im.size[1])], fill=(255, 210, 0), width=2)
+    kept = set((c[2], c[3]) for c in cand_kept)
+    for (_c, _r, x, y, w, h) in cand_all:
         if (x, y) not in kept:
-            dr.rectangle([x * sc, y * sc, (x + sd) * sc, (y + sd) * sc],
+            dr.rectangle([x * sc, y * sc, (x + w) * sc, (y + h) * sc],
                          outline=(0, 120, 255), width=1)
-    for k, (_c, _r, x, y, sd) in enumerate(cand_kept, 1):
-        dr.rectangle([x * sc, y * sc, (x + sd) * sc, (y + sd) * sc],
+    fnt = _qa_font(max(12, im.size[1] // 30))
+    for k, (_c, _r, x, y, w, h) in enumerate(cand_kept, 1):
+        dr.rectangle([x * sc, y * sc, (x + w) * sc, (y + h) * sc],
                      outline=(0, 230, 255), width=4)
-        dr.text((x * sc + 6, y * sc + 4), str(k), fill=(0, 230, 255))
-    im.save(qa_path, quality=88)
+        dr.text((x * sc + 6, y * sc + 4), str(k), fill=(0, 230, 255), font=fnt)
+    if note:
+        fs = _qa_font(max(14, im.size[1] // 22))
+        dr.rectangle([0, 0, im.size[0], fs.size + 12 if hasattr(fs, "size") else 30],
+                     fill=(0, 0, 0))
+        dr.text((8, 4), note, fill=(255, 80, 80), font=fs)
+    os.makedirs(os.path.dirname(qa["path"]), exist_ok=True)
+    im.save(qa["path"], quality=88)
 
 
 def _save_rows(s, W, H, across_axis, det_job, rows_dir, stem, ext, bits="same",
@@ -557,7 +626,8 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                middle_rows=0, rows_per_plot=0, band_tile=True, write_qa=True,
                end_margin_m=0.5, tiles_pick="random", save_rows=False,
                bits="same", compress="lzw", georef=True, link_source=True,
-               tile_m=0.0, overlap_m=0.0,
+               tile_m=0.0, overlap_m=0.0, cover_rows=False, row_buffer_m=0.05,
+               tile_along_m=0.0,
                log=print, progress=None, cancel=None):
     """Cut every crop in `src_dir` into tiles.
 
@@ -568,6 +638,14 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                           tile_m / target px. Plots at that scale are copied exactly,
                           others resampled (Lanczos). Only whole tiles are written.
                           tile / overlap / band_tile are then derived / ignored.
+    cover_rows            middle-rows mode: the tile's size ACROSS the rows is set so
+                          it holds the middle_rows rows: middle_rows x the median row
+                          spacing of all plots (measured first) + row_buffer_m on each
+                          side - one size for the whole run. Along the rows the tile
+                          is tile_along_m (0 = the same, square). Non-square tiles of
+                          plots whose rows run up-down are turned 90 deg, so every
+                          tile has the same width x height. rows_report.csv says per
+                          plot whether its band fits in the tile (rows_covered).
     tile / overlap        pixels. stride = tile - overlap.
     rows_only             restrict to the measured seed-row band.
     row_pitch_mm          row spacing; only used to find the band. 0 = guess from
@@ -615,6 +693,7 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
     import rasterio
     from PIL import Image
 
+    make_tiles.last_run = {}
     ext = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "tif": ".tif"}.get(fmt.lower(), ".png")
     bits = str(bits).strip().lower() or "same"
     compress = "none" if str(compress).lower().startswith(("none", "unc")) else "lzw"
@@ -631,7 +710,10 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
     if not files:
         log(f"[!] no GeoTIFF crops in {src_dir}")
         return 0, 0, ""
-    uniform = tile_m > 0
+    cover_rows = bool(cover_rows and middle_rows > 0)
+    uniform = tile_m > 0 or cover_rows
+    out_along = out_across = 0                 # uniform: output tile px along / across
+    det_cache = {}
     if uniform:
         # ground tiles: one output scale for the whole run, so every tile has the
         # same pixel size and the same ground size
@@ -658,14 +740,60 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
         v = np.array(list(gsd.values()))
         if target_mm_px <= 0:                  # the plot nearest the median: its
             target_mm_px = float(v[np.argmin(abs(v - np.median(v)))])   # tiles are exact
-        tile = max(8, int(round(tile_m * 1000.0 / target_mm_px)))
+        along_m = across_m = tile_m
+        if cover_rows:
+            # rows of every plot first: one tile size across, from the median spacing
+            log(f"Measuring the rows of {len(files)} plot(s) to size the tiles ...")
+            pitches = []
+            for fi, fn in enumerate(files):
+                if cancel is not None and cancel.is_set():
+                    log("Tiling cancelled.")
+                    return 0, 0, ""
+                try:
+                    with rasterio.open(os.path.join(src_dir, fn)) as s0:
+                        ax0 = 0 if s0.height < s0.width else 1
+                        _sm, det0, f0, fl0 = _detect_plot(s0, s0.width, s0.height, ax0,
+                                                          gsd[fn], row_pitch_mm,
+                                                          rows_per_plot)
+                    det_cache[fn] = (det0, f0, fl0)
+                    if det0.get("ok"):
+                        pitches.append(det0["pitch_px"] * f0 * gsd[fn])
+                except Exception as e:
+                    log(f"[!] {fn}: {e}")
+                if progress:
+                    progress(fi + 1, 2 * len(files))
+            if pitches:
+                pitch_mm = float(np.median(pitches))
+                log(f"Row spacing {min(pitches):.0f}-{max(pitches):.0f} mm on "
+                    f"{len(pitches)} plot(s), median {pitch_mm:.0f} mm.")
+            elif row_pitch_mm > 0:
+                pitch_mm = row_pitch_mm
+                log(f"[!] rows not found on any plot: using the given spacing {pitch_mm:g} mm")
+            else:
+                log("[!] rows not found on any plot and no row spacing given - "
+                    "nothing written")
+                return 0, 0, ""
+            across_m = round(middle_rows * pitch_mm / 1000.0 + 2 * max(0.0, row_buffer_m), 3)
+            along_m = tile_along_m if tile_along_m > 0 else across_m
+            tile_m = along_m
+        out_along = max(8, int(round(along_m * 1000.0 / target_mm_px)))
+        out_across = max(8, int(round(across_m * 1000.0 / target_mm_px)))
+        tile = out_along
         overlap = max(0, int(round(overlap_m * 1000.0 / target_mm_px)))
         if overlap >= tile:
             raise ValueError("Overlap must be smaller than the tile size.")
         band_tile = False
-        log(f"Ground tiles: {tile_m:g} m x {tile_m:g} m, overlap {overlap_m:g} m. Plot images "
+        if cover_rows:
+            log(f"Tiles cover the {middle_rows} middle rows: across {middle_rows} x "
+                f"{pitch_mm:.0f} mm + 2 x {row_buffer_m * 1000:.0f} mm buffer = "
+                f"{across_m:.3f} m, along {along_m:.3f} m"
+                + (" (square)" if along_m == across_m else "") + ".")
+        log(f"Ground tiles: {along_m:g} m along x {across_m:g} m across, overlap "
+            f"{overlap_m:g} m. Plot images "
             f"{v.min():.3f}-{v.max():.3f} mm/px (median {np.median(v):.3f}); output "
-            f"{target_mm_px:.3f} mm/px -> every tile {tile} x {tile} px.")
+            f"{target_mm_px:.3f} mm/px -> every tile {out_along} x {out_across} px"
+            + (" (rows left-right; tiles of plots with up-down rows are turned)"
+               if out_along != out_across else "") + ".")
     stride = max(1, tile - max(0, overlap))
     rnd = random.Random(seed)
     rows_out = []
@@ -692,7 +820,8 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
             f"plot (rows detected per plot"
             + (f", {rows_per_plot} sown rows" if rows_per_plot else "") + "), "
             + ("square tiles spanning the band, native pixels" if band_tile
-               else f"{tile_m:g} m tiles on the band" if uniform
+               else (f"{tile_m:g} m x {out_across * target_mm_px / 1000.0:.3g} m tiles "
+                     "centred on the band") if uniform
                else f"{tile}px tiles on the band")
             + f", tiles kept {end_margin_m:.2f} m inside the planted plot ends"
             + (f", {max_tiles_per_plot} tile(s) per plot ({tiles_pick})" if max_tiles_per_plot
@@ -709,6 +838,7 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
             + f", {ext[1:].upper()} output.")
         _out_desc(log, ext, bits, compress, georef, link_source)
 
+    det_cache_used = bool(det_cache)
     for fi, fn in enumerate(files):
         if cancel is not None and cancel.is_set():
             log("Tiling cancelled.")
@@ -733,25 +863,32 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                 if uniform:
                     src_mm = gsd[fn]
                 win_px = tile
+                win_across = None
                 if target_mm_px > 0 and src_mm and src_mm > 0:
                     win_px = max(8, int(round(tile * target_mm_px / src_mm)))
+                    if uniform and out_across != out_along:
+                        win_across = max(8, int(round(out_across * target_mm_px / src_mm)))
                 if row_pitch_mm > 0 and plot_width_mm > 0:
                     across_px = H if across_axis == 0 else W
                     pitch_px = row_pitch_mm / (plot_width_mm / across_px)
                 else:
                     pitch_px = (H if across_axis == 0 else W) / 5.5
                 lo, hi = 0, (H if across_axis == 0 else W)
+                qa_job, qa_note, cand_all = None, "", []
                 if middle_rows > 0:
-                    qa = None
-                    if write_qa:
-                        os.makedirs(os.path.join(out_dir, "_rows_qa"), exist_ok=True)
-                        qa = os.path.join(out_dir, "_rows_qa", stem + "_rows.jpg")
+                    qa = (os.path.join(out_dir, "_rows_qa", stem + "_rows.jpg")
+                          if write_qa else None)
+                    det_in = None
+                    if fn in det_cache:
+                        det_in = _detect_plot(s, W, H, across_axis, src_mm, row_pitch_mm,
+                                              rows_per_plot, det=det_cache.pop(fn)[0])
                     cand, info = _middle_row_cands(
                         s, W, H, across_axis, middle_rows, rows_per_plot, src_mm,
                         row_pitch_mm, band_tile, win_px,
                         int(round(overlap * win_px / max(1, tile))), qa,
                         ext_margin_mm=1000.0 * ext_margin.get(fn, 0.0),
-                        end_margin_mm=1000.0 * max(0.0, end_margin_m), strict=uniform)
+                        end_margin_mm=1000.0 * max(0.0, end_margin_m), strict=uniform,
+                        win_across=win_across, det_in=det_in)
                     qa_job = info.pop("_qa", None)
                     det_job = info.pop("_det", None)
                     if save_rows and det_job:
@@ -765,28 +902,40 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                     info = dict(plot_stem=stem, src=fn, tiles_in_band=len(cand), **info)
                     cand_all = cand
                     if not cand:
+                        qa_note = f"no tiles: {info['reason']}"
                         log(f"[!] {fn}: no middle-row tiles ({info['reason']}) - skipped")
                     else:
                         cand = _pick(cand, max_tiles_per_plot, tiles_pick, rnd)
                         if max_tiles_per_plot and len(cand) < max_tiles_per_plot:
                             log(f"   {fn}: only {len(cand)} tile(s) fit, "
                                 f"{max_tiles_per_plot} asked")
-                    if qa_job:
-                        _write_middle_qa(qa_job, W, H, across_axis, cand_all, cand)
+                        if info.get("rows_covered") is False:
+                            qa_note = (f"band {info.get('band_mm', '?')} mm is wider than "
+                                       f"the tile ({info.get('tile_across_mm', '?')} mm)")
                     info["tiles_drawn"] = len(cand)
                     row_reports.append(info)
                     if cand:
-                        lo = min((y if across_axis == 0 else x) for (_c, _r, x, y, _sd) in cand)
-                        hi = max((y if across_axis == 0 else x) + sd for (_c, _r, x, y, sd) in cand)
-                elif rows_only:
-                    dec = max(1, int(round(min(W, H) / 900)))
-                    small = to8(s.read([1, 2, 3], out_shape=(3, max(1, H // dec), max(1, W // dec))))
-                    l2, h2 = row_band(small, across_axis, pitch_px / dec)
-                    lo, hi = l2 * dec, min(hi, h2 * dec)
-                    if hi - lo < win_px:    # band thinner than a tile: centre it
-                        c = (lo + hi) // 2
-                        lo = max(0, c - win_px // 2)
-                        hi = min((H if across_axis == 0 else W), lo + win_px)
+                        lo = min(c[3] if across_axis == 0 else c[2] for c in cand)
+                        hi = max(c[3] + c[5] if across_axis == 0 else c[2] + c[4]
+                                 for c in cand)
+                else:
+                    small = None
+                    if rows_only:
+                        dec = max(1, int(round(min(W, H) / 900)))
+                        small = to8(s.read([1, 2, 3], out_shape=(3, max(1, H // dec), max(1, W // dec))))
+                        l2, h2 = row_band(small, across_axis, pitch_px / dec)
+                        lo, hi = l2 * dec, min(hi, h2 * dec)
+                        if hi - lo < win_px:    # band thinner than a tile: centre it
+                            c = (lo + hi) // 2
+                            lo = max(0, c - win_px // 2)
+                            hi = min((H if across_axis == 0 else W), lo + win_px)
+                    if write_qa:
+                        if small is None:
+                            small = _small_copy(s, W, H)
+                        qa_job = dict(path=os.path.join(out_dir, "_tiles_qa",
+                                                        stem + "_tiles.jpg"),
+                                      small=small, det=None, band=None, us=None, fl=1.0,
+                                      lohi=(lo, hi))
 
                 limit = 0
                 if middle_rows <= 0:
@@ -799,14 +948,16 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                     cand = []
                     for r_i, y in enumerate(_starts(y0b, y1b, win_px, src_stride)):
                         for c_i, x in enumerate(_starts(x0b, x1b, win_px, src_stride)):
-                            cand.append((c_i, r_i, x, y, win_px))
+                            cand.append((c_i, r_i, x, y, win_px, win_px))
                     if not cand and not uniform:
-                        cand = [(0, 0, x0b, y0b, win_px)]
+                        cand = [(0, 0, x0b, y0b, win_px, win_px)]
                     if uniform:                 # whole tiles only
                         cand = [c for c in cand if c[2] + win_px <= W and c[3] + win_px <= H]
                         if not cand:
+                            qa_note = f"no tiles: {W}x{H} px is smaller than one tile"
                             log(f"[!] {fn}: {W}x{H} px is smaller than one "
                                 f"{tile_m:g} m tile ({win_px} px) - skipped")
+                    cand_all = list(cand)
                     if max_tiles_per_plot and tiles_pick != "spread":
                         # random: walk a shuffled list until N tiles are kept, so
                         # tiles dropped as nodata / low vegetation are back-filled
@@ -816,22 +967,25 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                         cand = _pick(cand, max_tiles_per_plot, tiles_pick, rnd)
 
                 kept = 0
-                for (c_i, r_i, x, y, side) in cand:
+                written = []
+                for (c_i, r_i, x, y, sw, sh) in cand:
                     if middle_rows <= 0 and limit and kept >= limit:
                         break
-                    # output size: `tile` for the plain grid; a band-spanning
-                    # middle-rows tile keeps its native size unless a ground
-                    # scale is fixed (then it is resampled to that scale)
-                    if middle_rows > 0 and band_tile:
-                        out_px = (max(8, int(round(side * src_mm / target_mm_px)))
-                                  if (target_mm_px > 0 and src_mm) else side)
+                    # output size: ground tiles are out_along x out_across px on
+                    # every plot; a band-spanning middle-rows tile keeps its native
+                    # size unless a ground scale is fixed; else `tile`
+                    if uniform:
+                        fw, fh = ((out_along, out_across) if across_axis == 0
+                                  else (out_across, out_along))
+                    elif middle_rows > 0 and band_tile:
+                        fw = fh = (max(8, int(round(sw * src_mm / target_mm_px)))
+                                   if (target_mm_px > 0 and src_mm) else sw)
                     else:
-                        out_px = tile
-                    win_px = side
-                    w = min(win_px, W - x); h = min(win_px, H - y)
-                    if w < win_px // 2 or h < win_px // 2:
+                        fw = fh = tile
+                    w = min(sw, W - x); h = min(sh, H - y)
+                    if w < sw // 2 or h < sh // 2:
                         continue
-                    if uniform and (w < win_px or h < win_px):
+                    if uniform and (w < sw or h < sh):
                         continue
                     a = s.read(window=rasterio.windows.Window(x, y, w, h))
                     if a.shape[0] < 3:
@@ -857,19 +1011,22 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                         dest = os.path.join(out_dir, name)
                         rel = name
                     out = convert_bits(rgb, 8 if ext == ".jpg" else bits)
-                    ow, oh = w, h
-                    if win_px != out_px:
-                        # proportional, so a clipped window keeps the same scale;
-                        # each channel resampled in float (works for 8 and 16 bit)
-                        ow = max(1, int(round(w * out_px / win_px)))
-                        oh = max(1, int(round(h * out_px / win_px)))
-                        top = 255 if out.dtype == np.uint8 else 65535
-                        out = np.stack([np.asarray(Image.fromarray(c.astype(np.float32), "F")
-                                                   .resize((ow, oh), Image.LANCZOS))
-                                        for c in out]).round().clip(0, top).astype(out.dtype)
+                    # proportional, so a clipped window keeps the same scale; each
+                    # channel resampled in float (works for 8 and 16 bit)
+                    ow = max(1, int(round(w * fw / sw)))
+                    oh = max(1, int(round(h * fh / sh)))
+                    resampled = (ow, oh) != (w, h)
+                    if resampled:
+                        out = _resize(out, ow, oh)
                     crs = tf = gc = None
                     if georef and ext == ".tif":
                         crs, tf, gc = _tile_georef(s, x, y, w, h, ow, oh)
+                    # non-square ground tiles all run left-right (rows along x)
+                    turned = bool(uniform and across_axis == 1 and out_along != out_across)
+                    if turned:
+                        out = np.ascontiguousarray(np.rot90(out, 1, axes=(1, 2)))
+                        if tf is not None or gc:
+                            crs, tf, gc = _turn_georef(crs, tf, gc, ow)
                     lk = (_link_fields(links.get(fn), crop_tags, x, y, w, h, iiq_settings)
                           if link_source else {})
                     tags = None
@@ -885,14 +1042,22 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                                     BIT_DEPTH=f"{8 * out.dtype.itemsize}"
                                               + ("" if out.dtype == rgb.dtype else
                                                  f" (converted from {8 * rgb.dtype.itemsize})"))
+                    if tags is not None and turned:
+                        tags["TURNED_90"] = "True"
                     write_tile(dest, out, ext, compress, crs, tf, gc, tags)
+                    written.append((c_i, r_i, x, y, w, h))
                     rows_out.append(dict(tile=name, rel_path=rel, plot_stem=stem, col=c_i, row=r_i,
                                          x0=x, y0=y, w=w, h=h,
-                                         out_px=out_px,
+                                         out_px=(out.shape[2] if out.shape[2] == out.shape[1]
+                                                 else f"{out.shape[2]}x{out.shape[1]}"),
+                                         out_w=out.shape[2], out_h=out.shape[1],
+                                         turned_90=turned,
                                          src_mm_px=round(src_mm, 4) if src_mm else "",
                                          tile_mm_px=round(target_mm_px, 4) if (src_mm and target_mm_px) else "",
                                          tile_m=tile_m if uniform else "",
-                                         resampled=(win_px != out_px),
+                                         tile_across_m=(round(out_across * target_mm_px / 1000.0, 4)
+                                                        if uniform else ""),
+                                         resampled=resampled,
                                          ground_mm=round(w * (src_mm or 0), 1) if src_mm else "",
                                          band_lo=lo, band_hi=hi,
                                          across_axis=across_axis,
@@ -904,16 +1069,26 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                                                  "gcps" if gc else ""),
                                          **lk))
                     kept += 1
+                if qa_job:
+                    try:
+                        if cand_all and not written and not qa_note:
+                            qa_note = "no tiles kept (nodata / low vegetation)"
+                        _write_middle_qa(qa_job, W, H, across_axis, cand_all, written,
+                                         note=qa_note)
+                    except Exception as e:
+                        log(f"[!] {fn}: QA picture: {e}")
         except Exception as e:
             log(f"[!] {fn}: {e}")
         if progress:
-            progress(fi + 1, len(files))
+            progress((len(files) + fi + 1) if det_cache_used else (fi + 1),
+                     (2 * len(files)) if det_cache_used else len(files))
         if (fi + 1) % 25 == 0:
             log(f"   {fi+1}/{len(files)} plots, {len(rows_out)} tiles")
 
     idx = os.path.join(out_dir, "tile_index.csv")
     keys = ["tile", "rel_path", "plot_stem", "col", "row", "x0", "y0", "w", "h", "out_px",
-            "src_mm_px", "tile_mm_px", "ground_mm", "tile_m", "resampled",
+            "out_w", "out_h", "turned_90",
+            "src_mm_px", "tile_mm_px", "ground_mm", "tile_m", "tile_across_m", "resampled",
             "band_lo", "band_hi", "across_axis", "src_w", "src_h", "veg_pct", "src",
             "bits", "src_bits", "georef"]
     if link_source:
@@ -936,7 +1111,8 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
         rep = os.path.join(out_dir, "rows_report.csv")
         rkeys = ["plot_stem", "src", "ok", "reason", "rows_found", "rows_present",
                  "pitch_px", "pitch_mm", "angle_deg", "middle_rows", "band_lo",
-                 "band_hi", "plot_len_m", "end_trim", "usable_lo", "usable_hi",
+                 "band_hi", "band_mm", "tile_across_mm", "rows_covered",
+                 "plot_len_m", "end_trim", "usable_lo", "usable_hi",
                  "usable_len_m", "tiles_fit", "tiles_in_band", "tiles_drawn",
                  "rows_saved", "veg_mode"]
         with open(rep, "w", newline="") as fh:
@@ -946,7 +1122,21 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                 wr.writerow(rr)
         n_ok = sum(1 for rr in row_reports if rr["tiles_in_band"])
         log(f"Middle rows found on {n_ok}/{len(row_reports)} plot(s); per-plot rows: "
-            f"{rep}" + ("  (pictures in _rows_qa\\)" if write_qa else ""))
+            f"{rep}" + (f"  (QA pictures of all {len(row_reports)} plots in _rows_qa\\)"
+                        if write_qa else ""))
+        unc = [rr["plot_stem"] for rr in row_reports
+               if rr.get("tiles_drawn") and rr.get("rows_covered") is False]
+        if unc:
+            log(f"[!] on {len(unc)} plot(s) the {middle_rows} rows are wider than the tile "
+                f"(wider row spacing than the median): " + ", ".join(unc[:6])
+                + (" ..." if len(unc) > 6 else "")
+                + " - raise the buffer to cover them (rows_report.csv: band_mm, "
+                  "tile_across_mm)")
+        elif cover_rows:
+            log(f"Rows covered: the {middle_rows} middle rows fit inside the tile on every "
+                "plot with tiles.")
+    elif write_qa:
+        log(f"QA pictures: {os.path.join(out_dir, '_tiles_qa')}")
     plots = len({r["plot_stem"] for r in rows_out})
     log(f"Wrote {len(rows_out)} tiles from {plots} plot(s) -> {out_dir}")
     log(f"Index: {idx}  (needed to map a tile back to its plot)")
@@ -955,12 +1145,18 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
         log(f"Vegetation per tile: median {np.median(v):.2f}%  "
             f"empty (<0.5%) {100*(v<0.5).mean():.1f}%")
         if uniform:
-            sz = {(r["out_px"]) for r in rows_out}
+            sz = {f"{r['out_w']}x{r['out_h']}" for r in rows_out}
             log(f"Tile size check: {len(rows_out)} tiles, pixel sizes {sorted(sz)} "
                 f"({'all the same' if len(sz) == 1 else 'NOT uniform'}); "
                 f"{sum(1 for r in rows_out if not r['resampled'])} exact copies, "
                 f"{sum(1 for r in rows_out if r['resampled'])} resampled to "
                 f"{target_mm_px:.3f} mm/px")
+    # what the run actually used, for the recipe
+    make_tiles.last_run = (dict(tile_px=[out_along, out_across],
+                                tile_along_m=round(out_along * target_mm_px / 1000.0, 4),
+                                tile_across_m=round(out_across * target_mm_px / 1000.0, 4),
+                                out_mm_px=round(target_mm_px, 4))
+                           if uniform else {})
     return len(rows_out), plots, idx
 
 
@@ -1033,19 +1229,24 @@ def _write_csv(path, recs, keys):
         wr.writerows(recs)
 
 
-def _write_rows_qa(path, small, det, W, boxes):
+def _write_rows_qa(path, small, det, W, boxes, note=""):
     """QA picture: detected rows (row_detect colours) and every row tile written
-    (cyan), labelled with its row number."""
+    (cyan), labelled with its row number; note = why a plot got nothing."""
     import row_detect as rd
     from PIL import ImageDraw
     os.makedirs(os.path.dirname(path), exist_ok=True)
     im = rd.draw_rows(np.transpose(small, (1, 2, 0)), det)
     sc = im.size[0] / float(W)
     dr = ImageDraw.Draw(im)
+    fnt = _qa_font(max(12, im.size[1] // 30))
     for (x, y, w, h, k) in boxes:
         dr.rectangle([x * sc, y * sc, (x + w) * sc, (y + h) * sc], outline=(0, 230, 255), width=2)
     for (x, y, w, h, k) in {b[4]: b for b in boxes}.values():
-        dr.text((x * sc + 4, y * sc + 2), f"row {k}", fill=(255, 255, 0))
+        dr.text((x * sc + 4, y * sc + 2), f"row {k}", fill=(255, 255, 0), font=fnt)
+    if note:
+        fs = _qa_font(max(14, im.size[1] // 22))
+        dr.rectangle([0, 0, im.size[0], getattr(fs, "size", 18) + 12], fill=(0, 0, 0))
+        dr.text((8, 4), note, fill=(255, 80, 80), font=fs)
     im.save(path, quality=88)
 
 
@@ -1150,13 +1351,23 @@ def make_row_tiles(src_dir, out_dir, rows="all", rows_per_plot=0, row_pitch_mm=0
                     angle_deg=round(det.get("angle_deg", 0.0), 2),
                     veg_mode=det.get("veg_mode", ""),
                     src_mm_px=round(src_mm, 4) if src_mm else "")
+
+        def skipped_qa():                       # skipped plots get their picture too
+            if write_qa:
+                try:
+                    _write_rows_qa(os.path.join(out_dir, "_rows_qa", stem + "_rows.jpg"),
+                                   small, det, W, [], note=f"no rows written: {info['reason']}")
+                except Exception as e:
+                    log(f"[!] {fn}: QA picture: {e}")
         if not det.get("ok"):
             info["reason"] = det.get("reason", "rows not found")
             log(f"[!] {fn}: rows not found ({info['reason']}) - skipped")
+            skipped_qa()
             continue
         if not src_mm:
             info["reason"] = "no ground scale (not georeferenced; give the plot width)"
             log(f"[!] {fn}: {info['reason']} - skipped")
+            skipped_qa()
             continue
         pr = det["plot_rows"]
         n = len(pr)
@@ -1172,6 +1383,7 @@ def make_row_tiles(src_dir, out_dir, rows="all", rows_per_plot=0, row_pitch_mm=0
         if not ks:
             info["reason"] = info["reason"] or f"{n} row(s) found, rows '{rows}' asked"
             log(f"[!] {fn}: {info['reason']} - skipped")
+            skipped_qa()
             continue
         P = det["pitch_px"]
         ends = {}
@@ -1328,8 +1540,12 @@ def make_row_tiles(src_dir, out_dir, rows="all", rows_per_plot=0, row_pitch_mm=0
             log(f"[!] {fn}: {e}")
         if write_qa and p.get("small") is not None:
             try:
+                note = ""
+                if row_tiles and not qa_boxes:
+                    note = ("no row tiles: the row is shorter than one tile or the "
+                            "tile is wider than the plot")
                 _write_rows_qa(os.path.join(out_dir, "_rows_qa", stem + "_rows.jpg"),
-                               p["small"], det, W, qa_boxes)
+                               p["small"], det, W, qa_boxes, note=note)
             except Exception as e:
                 log(f"[!] {fn}: QA picture: {e}")
             p["small"] = None
@@ -1464,6 +1680,9 @@ def _build_plot_tiles_tab(parent, defaults=None):
         "mid_n": tk.StringVar(value=str(d.get("mid_n", 3))),
         "mid_rows": tk.StringVar(value=str(d.get("mid_rows", 0))),
         "mid_qa": tk.BooleanVar(value=bool(d.get("mid_qa", True))),
+        "mid_cover": tk.BooleanVar(value=bool(d.get("mid_cover", True))),
+        "mid_buffer": tk.StringVar(value=str(d.get("mid_buffer", 0.05))),
+        "mid_along": tk.StringVar(value=str(d.get("mid_along", ""))),
         "mid_pick": tk.StringVar(value=d.get("mid_pick", "random")),
         "mid_end": tk.StringVar(value=str(d.get("mid_end", 0.5))),
         "bits": tk.StringVar(value=str(d.get("bits", BITS_CHOICES[0]))),
@@ -1576,7 +1795,16 @@ def _build_plot_tiles_tab(parent, defaults=None):
         side="left", padx=(0, 4))
     ttk.Spinbox(o2m, from_=0, to=24, textvariable=V["mid_rows"], width=3).pack(
         side="left", padx=(0, 12))
-    ttk.Checkbutton(o2m, text="QA pictures", variable=V["mid_qa"]).pack(side="left")
+    o2c = ttk.Frame(frm)
+    o2c.grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, 4))
+    r += 1
+    ttk.Label(o2c, text="      ").pack(side="left")
+    ttk.Checkbutton(o2c, text="Size the tiles to cover these rows:  N x row spacing + buffer",
+                    variable=V["mid_cover"]).pack(side="left", padx=(0, 4))
+    ttk.Entry(o2c, textvariable=V["mid_buffer"], width=5).pack(side="left", padx=(0, 4))
+    ttk.Label(o2c, text="m each side;  length along the rows").pack(side="left", padx=(0, 4))
+    ttk.Entry(o2c, textvariable=V["mid_along"], width=5).pack(side="left", padx=(0, 4))
+    ttk.Label(o2c, text="m (blank = square)", foreground="grey").pack(side="left")
     o2n = ttk.Frame(frm)
     o2n.grid(row=r, column=0, columnspan=3, sticky="w", pady=(0, 4))
     r += 1
@@ -1591,7 +1819,11 @@ def _build_plot_tiles_tab(parent, defaults=None):
                         "stay inside the planted length, the set distance away "
                         "from the bare plot ends, and are centred there; 'tiles "
                         "per plot' then takes that many (random, or 'spread' = "
-                        "evenly spaced). Give the sown rows per plot when known - "
+                        "evenly spaced). 'Cover these rows' measures the row spacing "
+                        "of every plot first and makes ONE tile size for the run "
+                        "(e.g. 3 x 215 mm + 2 x 0.05 m = 0.745 m), so every tile holds "
+                        "the N rows and all tiles have the same pixel size (Tile size "
+                        "is then not used). Give the sown rows per plot when known - "
                         "it decides which rows are central when the grid clips an "
                         "outer row. Set a margin at extraction so outer rows are "
                         "whole.",
@@ -1625,7 +1857,10 @@ def _build_plot_tiles_tab(parent, defaults=None):
     r += 1
     ttk.Checkbutton(o4, text="One folder per plot (out/<plot>/...) instead of "
                             "one flat folder",
-                    variable=V["subdirs"]).pack(side="left")
+                    variable=V["subdirs"]).pack(side="left", padx=(0, 16))
+    ttk.Checkbutton(o4, text="QA pictures, one per plot (_rows_qa\\ with middle rows, "
+                            "else _tiles_qa\\)",
+                    variable=V["mid_qa"]).pack(side="left")
 
     btn1 = ttk.Frame(frm)
     btn1.grid(row=r, column=0, columnspan=3, sticky="w", pady=6)
@@ -1705,15 +1940,18 @@ def _build_plot_tiles_tab(parent, defaults=None):
                                    "The output folder must not be the crops folder.")
             return
         tm = _f(V["tile_m"], 1.0); om = _f(V["overlap_m"], 0.0)
-        if tm <= 0:
+        cover = bool(V["mid_on"].get() and V["mid_cover"].get())
+        if tm <= 0 and not cover:
             messagebox.showwarning("Make tiles", "Tile size must be more than 0 m.")
             return
-        if om >= tm:
+        if om >= tm and not cover:
             messagebox.showwarning("Make tiles",
                                    "Overlap must be smaller than the tile size.")
             return
         kw = dict(
-            tile_m=tm, overlap_m=om,
+            tile_m=tm, overlap_m=om, cover_rows=cover,
+            row_buffer_m=max(0.0, _f(V["mid_buffer"], 0.05)),
+            tile_along_m=max(0.0, _f(V["mid_along"], 0.0)),
             rows_only=bool(V["rows_only"].get()),
             row_pitch_mm=_f(V["pitch"], 0.0), plot_width_mm=_f(V["plotw"], 0.0),
             fmt=V["fmt"].get(), min_veg_pct=_f(V["minveg"], 0.0),
@@ -1740,7 +1978,8 @@ def _build_plot_tiles_tab(parent, defaults=None):
                                        cancel=cancel_ev, **kw)
             rcp.write_recipe(out, "plot_tiles", gui=gui, params=prm,
                              results=dict(tiles=n, plots=plots, index=idx,
-                                          cancelled=cancel_ev.is_set()),
+                                          cancelled=cancel_ev.is_set(),
+                                          **getattr(make_tiles, "last_run", {})),
                              src_dir=src, log=put)
         start(job)
 
@@ -2121,6 +2360,8 @@ def stitch_tiles(tile_dir, out_dir, index_csv="", log=print, progress=None,
                 if not src:
                     continue
                 tim = Image.fromarray(to8(read_rgb(src)))
+                if str(r.get("turned_90", "")).lower() == "true":
+                    tim = tim.transpose(Image.ROTATE_270)      # undo np.rot90(.., 1)
                 # ground-referenced tiles were resampled off the source grid;
                 # put them back at source scale so the plot reassembles square
                 wh = (int(r["w"]), int(r["h"]))

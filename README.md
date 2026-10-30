@@ -374,6 +374,16 @@ pixel size on every plot and within each plot:
 - Only whole tiles are written (a plot smaller than a tile gets none, logged). Middle-row
   tiles are centred on the band of the N central rows and laid end to end, centred in
   the usable length. The log ends with a size check.
+- **Size the tiles to cover these rows** (middle-rows mode, default on): the rows of every
+  plot are measured first and ONE tile size is made for the run: across the rows N x the
+  median row spacing + a *buffer* on each side (default 0.05 m), along the rows the same
+  (square) or a set length. Every tile holds the N middle rows and every tile has the same
+  pixel size (York raw, 3 rows: 3 x 215 mm + 2 x 0.05 m = 0.744 m = 1310 px).
+  `rows_report.csv` has `band_mm`, `tile_across_mm` and `rows_covered` per plot; the log
+  lists plots whose rows are wider than the tile (raise the buffer). Non-square tiles of
+  plots whose rows run up-down are turned 90 deg so all tiles have the same width x height.
+- **QA pictures** in every mode: `_rows_qa\` (middle rows) or `_tiles_qa\` (grid), one per
+  plot - also for plots that got no tile, with the reason written on the picture (6b too).
 - *Square tiles spanning the band* and *save each row* were removed from this tab: whole
   rows are now on 6b.
 
@@ -408,7 +418,10 @@ Tested on the York 2025 calibration trial (36 plots, raw and rectified crops): 6
 360 tiles all 1761 / 1685 px square (1.000 m), middle-3-rows 108 tiles all 1761 px; 6b
 180 whole rows and 707 / 718 row tiles all one size; tiles at the output scale
 identical to the crop pixels; turned row tiles exactly `rot90` of the crop window with
-0.000 mm georeference error (affine and GCP crops).
+0.000 mm georeference error (affine and GCP crops). Covering the middle rows: 3 rows 150
+tiles all 1310 / 1255 px square (0.744 / 0.745 m), 5 rows x 1 m along 108 tiles all
+1761 x 2065 / 1685 x 1980 px; the rows inside the tile on 36/36 plots (3-row band
+618-656 mm vs a 745 mm tile); 36 QA pictures in every mode.
 
 ![Tab 6b](docs/images/app_tab6b_rows.png)
 
