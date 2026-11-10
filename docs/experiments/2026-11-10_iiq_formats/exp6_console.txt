@@ -1,0 +1,14 @@
+N16_geotiff  pixel_1024   664 tiles / 36 plots  {'uint16': 664}  exact copies 664, mismatched 0, resampled 0   38 s
+N16_geotiff  ground_1m    372 tiles / 36 plots  {'uint16': 372}  exact copies 10, mismatched 0, resampled 362 (x0.886-1.050)  27 s
+N16_geotiff  row tiles   432 tiles, {'uint16': 200}, resampled 420  0 s
+N8_tiff      pixel_1024   664 tiles / 36 plots  {'uint8': 664}  exact copies 664, mismatched 0, resampled 0   29 s
+N8_tiff      ground_1m   no tiles: [!] the plot images carry no ground scale (no georeference) and no plot width was given: tiles in metres cannot be cut
+N8_jpeg      pixel_1024  no tiles: [!] no GeoTIFF crops in F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\N8_jpeg\RawCrops
+N8_jpeg      ground_1m   no tiles: [!] no GeoTIFF crops in F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\N8_jpeg\RawCrops
+N16_geotiff  pixel_1024   664 tiles / 36 plots  {'uint16': 664}  exact copies 664, mismatched 0, resampled 0   38 s
+N16_geotiff  ground_1m    372 tiles / 36 plots  {'uint16': 372}  exact copies 10, mismatched 0, resampled 362 (x0.886-1.050)  27 s
+N16_geotiff  row tiles   432 tiles, {'uint16': 200}, resampled 420  0 s
+N8_tiff      pixel_1024   664 tiles / 36 plots  {'uint8': 664}  exact copies 664, mismatched 0, resampled 0   29 s
+N8_tiff      ground_1m   no tiles: [!] the plot images carry no ground scale (no georeference) and no plot width was given: tiles in metres cannot be cut
+N8_jpeg      pixel_1024  no tiles: [!] no GeoTIFF crops in F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\N8_jpeg\RawCrops
+N8_jpeg      ground_1m   no tiles: [!] no GeoTIFF crops in F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\N8_jpeg\RawCrops

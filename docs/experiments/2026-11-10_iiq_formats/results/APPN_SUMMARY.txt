@@ -1,0 +1,10 @@
+APPN-UQ PhaseOne_Pipeline (03_backprojection.py + HR_clip.exe) on York 2025-06-25, 36 plots
+  plots with a clip: 30 / 36; dropped (no photo holds all 4 corners): 1003, 1004, 1005, 1006, 6001, 6002
+  PlotExtractor (direct IIQ): 36 / 36 (the dropped plots: whole plot in a photo for 2, otherwise the photo holding the largest part: 98.0 %, 99.3 %, 96.1 %, 99.6 %)
+  same photo chosen: 22 / 30
+  their clip inside PlotExtractor's box (same photo): 22 / 22
+  their output: uint8 TIFF, compression none, georeferenced: False, plot share of the clip 85.3-98.6 % (no mask, no margin)
+  THEIR box developed by PlotExtractor's developer with THEIR config_hr.txt: identical pixels 100.00 % (median), max diff 40/255, mean abs 0.0000/255
+  their config_hr.txt (repo template now): exposure +0.8 EV, shadow / highlight recovery 0.5, colour NR 0.5, no luminance NR, no sharpening -> mean RGB 171/125/97 vs Neutral 131/89/63 (plot 1001); clipped pixels (a channel at 255) median 1.71 % vs Neutral 0.22 %
+  pixels vs PlotExtractor's 'APPN HR_clip' preset (their earlier config: NR 0.8, sharpening 3.1, no exposure change): identical pixels 0.07 % (median), max diff 219/255, mean abs 36.2288/255
+  pixels vs PlotExtractor Neutral (no noise reduction / sharpening): mean abs 34.55/255, 99th pct 62/255

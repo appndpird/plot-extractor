@@ -144,11 +144,11 @@ def read_rgb(path):
         return np.asarray(im.convert("RGB"))
 
 
-def write_tile(dest, a, ext, compress="lzw", crs=None, transform=None, gcps=None,
+def write_tile(dest, a, ext, compress="deflate", crs=None, transform=None, gcps=None,
                tags=None):
     """Write a 3 x h x w tile, values unchanged (8 or 16 bit). TIFF and PNG are
     written with GDAL - TIFF as GeoTIFF when crs + transform (or gcps) are given,
-    LZW with horizontal predictor or uncompressed; JPEG (8-bit only) with PIL."""
+    Deflate or LZW with horizontal predictor, or uncompressed; JPEG (8-bit only) with PIL."""
     if ext == ".jpg":
         from PIL import Image
         if a.dtype != np.uint8:
@@ -162,8 +162,7 @@ def write_tile(dest, a, ext, compress="lzw", crs=None, transform=None, gcps=None
         prof["driver"] = "PNG"
     else:
         prof.update(driver="GTiff", photometric="RGB")
-        if compress != "none":
-            prof.update(compress="lzw", predictor=2)
+        prof.update(gdal_compress(compress))
         if crs is not None and transform is not None:
             prof.update(crs=crs, transform=transform)
     with warnings.catch_warnings():
@@ -558,7 +557,7 @@ def _write_middle_qa(qa, W, H, across_axis, cand_all, cand_kept, note=""):
 
 
 def _save_rows(s, W, H, across_axis, det_job, rows_dir, stem, ext, bits="same",
-               compress="lzw", select=None, horizontal=False, names=None):
+               compress="deflate", select=None, horizontal=False, names=None):
     """Write each of the plot's crop rows as its own image: <stem>_row<k><ext>, k = 1..n
     across the plot (from image top / left). The image is the axis-aligned box around
     the row's band (row centre +- half a pitch, following the rows' tilt), full plot
@@ -619,13 +618,29 @@ def _save_rows(s, W, H, across_axis, det_job, rows_dir, stem, ext, bits="same",
     return out
 
 
+def _one_band_guard(src_dir, files, log):
+    """Raw-sensor crops (one band, Bayer mosaic) cannot be tiled by vegetation / rows."""
+    import rasterio
+    try:
+        with rasterio.open(os.path.join(src_dir, files[0])) as d:
+            if d.count < 3:
+                raise RuntimeError(
+                    f"{files[0]} has {d.count} band(s): raw sensor values (Bayer mosaic) are "
+                    "kept for archiving or your own development - tiles need developed RGB "
+                    "plot images (tab 3a, or tab 3b with Pixels = Developed RGB).")
+    except RuntimeError:
+        raise
+    except Exception:
+        pass
+
+
 def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                row_pitch_mm=0.0, plot_width_mm=0.0, fmt="png",
                min_veg_pct=0.0, keep_empty_frac=0.15, max_tiles_per_plot=0,
                seed=7, target_mm_px=0.0, per_plot_dirs=False,
                middle_rows=0, rows_per_plot=0, band_tile=True, write_qa=True,
                end_margin_m=0.5, tiles_pick="random", save_rows=False,
-               bits="same", compress="lzw", georef=True, link_source=True,
+               bits="same", compress="deflate", georef=True, link_source=True,
                tile_m=0.0, overlap_m=0.0, cover_rows=False, row_buffer_m=0.05,
                tile_along_m=0.0,
                log=print, progress=None, cancel=None):
@@ -681,7 +696,7 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
                           row masked to 0), indexed in Rows/rows_index.csv.
     bits                  'same' (default) = the crop's own values, an exact copy;
                           8 or 16 converts (16->8 v/257 rounded, 8->16 v*257).
-    compress              TIFF compression: 'lzw' (lossless, smaller) or 'none'.
+    compress              TIFF compression: 'deflate' (lossless, smallest), 'lzw' or 'none'.
                           Both hold identical pixels.
     georef                TIFF tiles are GeoTIFFs: the crop's CRS and transform
                           shifted to the tile window (or its GCPs moved into it).
@@ -696,7 +711,7 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
     make_tiles.last_run = {}
     ext = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "tif": ".tif"}.get(fmt.lower(), ".png")
     bits = str(bits).strip().lower() or "same"
-    compress = "none" if str(compress).lower().startswith(("none", "unc")) else "lzw"
+    compress = compress_key(compress)
     if ext == ".jpg" and bits == "16":
         raise ValueError("JPEG is 8-bit only: choose TIFF or PNG for 16-bit tiles.")
     if ext != ".tif" and georef:
@@ -710,6 +725,7 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
     if not files:
         log(f"[!] no GeoTIFF crops in {src_dir}")
         return 0, 0, ""
+    _one_band_guard(src_dir, files, log)
     cover_rows = bool(cover_rows and middle_rows > 0)
     uniform = tile_m > 0 or cover_rows
     out_along = out_across = 0                 # uniform: output tile px along / across
@@ -1161,7 +1177,7 @@ def make_tiles(src_dir, out_dir, tile=1024, overlap=0, rows_only=True,
 
 
 # ---------------------------------------------------------------------------
-# whole rows and fixed-size tiles along each row (tab 6b)
+# whole rows and fixed-size tiles along each row (tab 4b)
 # ---------------------------------------------------------------------------
 def parse_rows(text):
     """Which crop rows to use: 'all' -> ('all', None); 'middle 3' -> ('middle', 3);
@@ -1254,7 +1270,7 @@ def make_row_tiles(src_dir, out_dir, rows="all", rows_per_plot=0, row_pitch_mm=0
                    plot_width_mm=0.0, save_rows=True, row_tiles=True, tile_len_m=1.0,
                    row_width_m=0.0, overlap_m=0.0, out_mm_px=0.0, end_margin_m=0.0,
                    horizontal=True, max_tiles_per_row=0, tiles_pick="spread", seed=7,
-                   fmt="tif", bits="same", compress="lzw", georef=True, link_source=True,
+                   fmt="tif", bits="same", compress="deflate", georef=True, link_source=True,
                    write_qa=True, log=print, progress=None, cancel=None):
     """Whole crop rows, and tiles of the same ground size along every row.
 
@@ -1285,7 +1301,7 @@ def make_row_tiles(src_dir, out_dir, rows="all", rows_per_plot=0, row_pitch_mm=0
 
     ext = {"png": ".png", "jpeg": ".jpg", "jpg": ".jpg", "tif": ".tif"}.get(fmt.lower(), ".tif")
     bits = str(bits).strip().lower() or "same"
-    compress = "none" if str(compress).lower().startswith(("none", "unc")) else "lzw"
+    compress = compress_key(compress)
     if ext == ".jpg" and bits == "16":
         raise ValueError("JPEG is 8-bit only: choose TIFF or PNG for 16-bit output.")
     if not (save_rows or row_tiles):
@@ -1298,6 +1314,7 @@ def make_row_tiles(src_dir, out_dir, rows="all", rows_per_plot=0, row_pitch_mm=0
     if not files:
         log(f"[!] no GeoTIFF crops in {src_dir}")
         return dict(rows=0, tiles=0, plots=0)
+    _one_band_guard(src_dir, files, log)
     # extraction margin per crop: the plot's own ends lie that far inside the crop ends
     ext_margin = {}
     for mf in (os.path.join(os.path.dirname(os.path.abspath(src_dir)), "manifest.csv"),
@@ -1583,7 +1600,27 @@ def make_row_tiles(src_dir, out_dir, rows="all", rows_per_plot=0, row_pitch_mm=0
 # stitching back
 # ---------------------------------------------------------------------------
 BITS_CHOICES = ["same as plot image (exact copy)", "8", "16"]
-COMPRESS_CHOICES = ["LZW (lossless, smaller)", "None (uncompressed)"]
+COMPRESS_CHOICES = ["Deflate (lossless, smallest)", "LZW (lossless)", "None (uncompressed)"]
+TILE_UNITS = ["m (same ground size, resampled)", "px (native pixels, never resampled)"]
+
+
+def compress_key(label):
+    """'deflate', 'lzw' or 'none' from a compression label or key."""
+    s = str(label or "").strip().lower()
+    if s.startswith(("none", "unc")):
+        return "none"
+    return "lzw" if s.startswith("lzw") else "deflate"
+
+
+def gdal_compress(key):
+    """GDAL GTiff creation options for a compression key; all are lossless and the
+    horizontal predictor only reorders values before compressing."""
+    key = compress_key(key)
+    if key == "none":
+        return {}
+    if key == "lzw":
+        return dict(compress="lzw", predictor=2)
+    return dict(compress="deflate", predictor=2, zlevel=6)
 
 
 def bits_key(label):
@@ -1596,8 +1633,8 @@ def _out_desc(log, ext, bits, compress, georef, link_source):
         log("Tiles: JPEG quality 95 (lossy, 8-bit) - not an exact copy")
         return
     log("Tiles: " + ext[1:].upper()
-        + (", LZW" if (ext == ".tif" and compress == "lzw") else
-           ", uncompressed" if ext == ".tif" else "")
+        + ((", " + {"deflate": "Deflate", "lzw": "LZW", "none": "uncompressed"}[
+            compress_key(compress)]) if ext == ".tif" else "")
         + (", the plot image's own values (exact copy)" if bits == "same" else
            f", converted to {bits}-bit")
         + (", georeferenced" if (georef and ext == ".tif") else "")
@@ -1630,21 +1667,21 @@ def _gui_values(V):
 
 
 def build_tiles_tab(parent, defaults=None):
-    """Tab 6: two sub-tabs - 6a plot tiles (fixed ground size) and 6b rows and row
-    tiles."""
+    """Tab 4 "Tiles Generation": 4a fixed ground size tiles, 4b row-based tiles (the
+    main window adds 4c QA to the returned notebook)."""
     from tkinter import ttk
     nb = ttk.Notebook(parent)
     a = ttk.Frame(nb)
     b = ttk.Frame(nb)
-    nb.add(a, text="6a  Plot tiles (fixed ground size)")
-    nb.add(b, text="6b  Rows and row tiles")
+    nb.add(a, text="4a  Fixed ground size tiles")
+    nb.add(b, text="4b  Row-based tiles")
     _build_plot_tiles_tab(a, defaults).pack(fill="both", expand=True)
     _build_row_tiles_tab(b, defaults).pack(fill="both", expand=True)
     return nb
 
 
 def _build_plot_tiles_tab(parent, defaults=None):
-    """Tab 6a: cut fixed-size ground tiles, and put labelled tiles back together.
+    """Tab 4a: cut fixed-size ground tiles, and put labelled tiles back together.
 
     Self-contained - its own log and progress, so it does not depend on the
     extract tab being visible. Long jobs run on a worker thread.
@@ -1665,6 +1702,7 @@ def _build_plot_tiles_tab(parent, defaults=None):
         "src": tk.StringVar(value=d.get("src", "")),
         "out": tk.StringVar(value=d.get("out", "")),
         "tile_m": tk.StringVar(value=str(d.get("tile_m", 1.0))),
+        "units": tk.StringVar(value=d.get("units", TILE_UNITS[0])),
         "overlap_m": tk.StringVar(value=str(d.get("overlap_m", 0.0))),
         "rows_only": tk.BooleanVar(value=bool(d.get("rows_only", True))),
         "pitch": tk.StringVar(value=str(d.get("pitch", ""))),
@@ -1725,11 +1763,14 @@ def _build_plot_tiles_tab(parent, defaults=None):
     o1 = ttk.Frame(frm)
     o1.grid(row=r, column=0, columnspan=3, sticky="w", pady=4)
     r += 1
-    for text, var, w in (("Tile size (m):", V["tile_m"], 6),
-                         ("Overlap (m):", V["overlap_m"], 6),
-                         ("Seed:", V["seed"], 4)):
+    for text, var, w in (("Tile size:", V["tile_m"], 6),
+                         ("Overlap:", V["overlap_m"], 6)):
         ttk.Label(o1, text=text).pack(side="left", padx=(0, 4))
-        ttk.Entry(o1, textvariable=var, width=w).pack(side="left", padx=(0, 12))
+        ttk.Entry(o1, textvariable=var, width=w).pack(side="left", padx=(0, 8))
+    ttk.Combobox(o1, textvariable=V["units"], width=27, state="readonly",
+                 values=TILE_UNITS).pack(side="left", padx=(0, 12))
+    ttk.Label(o1, text="Seed:").pack(side="left", padx=(0, 4))
+    ttk.Entry(o1, textvariable=V["seed"], width=4).pack(side="left", padx=(0, 12))
     ttk.Label(o1, text="Format:").pack(side="left", padx=(0, 4))
     ttk.Combobox(o1, textvariable=V["fmt"], width=6, state="readonly",
                  values=["tif", "png", "jpeg"]).pack(side="left")
@@ -1811,7 +1852,7 @@ def _build_plot_tiles_tab(parent, defaults=None):
     ttk.Label(o2n, text="      keep tiles").pack(side="left", padx=(0, 4))
     ttk.Entry(o2n, textvariable=V["mid_end"], width=5).pack(side="left", padx=(0, 4))
     ttk.Label(o2n, text="m from the plot ends").pack(side="left", padx=(0, 16))
-    ttk.Label(o2n, text="(whole rows and row tiles: tab 6b)",
+    ttk.Label(o2n, text="(whole rows and row tiles: tab 4b)",
               foreground="grey").pack(side="left")
     ttk.Label(frm, text="rows are detected in every plot (PhenoFuse row detection, "
                         "tilt-aware, works on raw and rectified crops); the band "
@@ -1940,16 +1981,21 @@ def _build_plot_tiles_tab(parent, defaults=None):
                                    "The output folder must not be the crops folder.")
             return
         tm = _f(V["tile_m"], 1.0); om = _f(V["overlap_m"], 0.0)
-        cover = bool(V["mid_on"].get() and V["mid_cover"].get())
+        native = V["units"].get() == TILE_UNITS[1]
+        cover = bool(V["mid_on"].get() and V["mid_cover"].get()) and not native
         if tm <= 0 and not cover:
-            messagebox.showwarning("Make tiles", "Tile size must be more than 0 m.")
+            messagebox.showwarning("Make tiles", "Tile size must be more than 0.")
             return
         if om >= tm and not cover:
             messagebox.showwarning("Make tiles",
                                    "Overlap must be smaller than the tile size.")
             return
+        if native and V["mid_on"].get() and V["mid_cover"].get():
+            put("[!] 'Size the tiles to cover these rows' works in metres - not used with "
+                "native pixel tiles")
         kw = dict(
-            tile_m=tm, overlap_m=om, cover_rows=cover,
+            tile=int(tm) if native else 1024, overlap=int(om) if native else 0,
+            tile_m=0.0 if native else tm, overlap_m=0.0 if native else om, cover_rows=cover,
             row_buffer_m=max(0.0, _f(V["mid_buffer"], 0.05)),
             tile_along_m=max(0.0, _f(V["mid_along"], 0.0)),
             rows_only=bool(V["rows_only"].get()),
@@ -1965,7 +2011,7 @@ def _build_plot_tiles_tab(parent, defaults=None):
             end_margin_m=_f(V["mid_end"], 0.5), tiles_pick=V["mid_pick"].get() or "random",
             save_rows=False,
             bits=bits_key(V["bits"].get()),
-            compress="none" if V["compress"].get().lower().startswith("none") else "lzw",
+            compress=compress_key(V["compress"].get()),
             georef=bool(V["georef"].get()), link_source=bool(V["link"].get()))
         gui = _gui_values(V)
 
@@ -2032,7 +2078,7 @@ def _build_plot_tiles_tab(parent, defaults=None):
 
 
 def _build_row_tiles_tab(parent, defaults=None):
-    """Tab 6b: whole crop rows (all, middle N or chosen rows) and tiles of one ground
+    """Tab 4b: whole crop rows (all, middle N or chosen rows) and tiles of one ground
     size along each row, written per plot:
         <out>/<plot>/rows/<plot>_row<k>.<ext>
         <out>/<plot>/row_tiles/row<k>/<plot>_row<k>_t<j>.<ext>"""
@@ -2255,7 +2301,7 @@ def _build_row_tiles_tab(parent, defaults=None):
                   max_tiles_per_row=max(0, int(_f(V["ntiles"], 0))),
                   tiles_pick=V["pick"].get() or "spread", seed=int(_f(V["seed"], 7)),
                   fmt=V["fmt"].get(), bits=bits_key(V["bits"].get()),
-                  compress="none" if V["compress"].get().lower().startswith("none") else "lzw",
+                  compress=compress_key(V["compress"].get()),
                   georef=bool(V["georef"].get()), link_source=bool(V["link"].get()),
                   write_qa=bool(V["qa"].get()))
         gui = _gui_values(V)

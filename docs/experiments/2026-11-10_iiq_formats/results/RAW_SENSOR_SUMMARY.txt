@@ -1,0 +1,6 @@
+Raw sensor values (LibRaw (0, 22, 1)) of the plot boxes, York 2025, 36 plots
+  written as 1-band 16-bit TIFF (Deflate): read back identical 36/36
+  values 0-65532 (16-bit container, ~16.0 bits used); levels used per plot 6060-8958
+  Bayer pattern of the boxes: ['BGGR', 'GBRG', 'GRBG', 'RGGB']
+  line-up with the developed Neutral crop (2x2 cells, log green): correlation 0.899-0.927, shift x -0.01..0.01 px, y -0.01..0.01 px
+  size: 1036 MB for 36 plots (one value per pixel: a third of a 16-bit RGB crop before compression)

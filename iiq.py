@@ -7,7 +7,7 @@
   * convert_folder + build_convert_tab: the "IIQ conversion" tab (IIQ -> TIFF, GeoTIFF
     or JPEG, 8 or 16 bit).
   * build_iiq_extract_tab: the "IIQ plot extraction" tab - the plot-wise extraction of
-    the Extract tab, with the pixels developed from the IIQ files instead of read from
+    tab 3a, with the pixels developed from the IIQ files instead of read from
     the JPEG/TIFF renditions.
 
 IIQ files are only ever READ. Nothing is written next to them: settings, job lists and
@@ -315,6 +315,65 @@ class Developer:
             pass
 
 
+class RawSensor:
+    """Reads the RAW SENSOR values of an IIQ box with LibRaw (rawpy): one 16-bit value per
+    pixel under the Bayer colour filter, exactly as recorded - no black level, demosaicing,
+    white balance, colour, tone curve, noise reduction or sharpening, so nothing is lost
+    or changed. Same interface as Developer (info / develop / used_unchanged / cleanup).
+    The frame is the developed frame (rawpy's visible area = the SDK's frame; York 2025:
+    shift < 0.02 px), so the boxes of a run line up with developed crops. Does not need
+    the Phase One SDK."""
+
+    def __init__(self, log=print):
+        import rawpy
+        self.rawpy = rawpy
+        self.log = log
+        self.settings = "raw sensor values (no development)"
+        self.sdk = {"root": "LibRaw (rawpy)",
+                    "version": "LibRaw " + ".".join(str(v) for v in rawpy.libraw_version)}
+        self._snap = {}
+        self._snap_lock = threading.Lock()
+        self._info = {}
+
+    def _remember(self, path):
+        with self._snap_lock:
+            if path not in self._snap:
+                self._snap.update(snapshot([path]))
+
+    def used_unchanged(self):
+        with self._snap_lock:
+            snap = dict(self._snap)
+        return len(snap), snapshot_changed(snap)
+
+    def info(self, path):
+        if path not in self._info:
+            with self.rawpy.imread(path) as r:
+                self._info[path] = (r.sizes.width, r.sizes.height)
+        return self._info[path]
+
+    def pattern(self, path, x0, y0):
+        """Bayer pattern of a box whose top-left pixel is (x0, y0), row by row (e.g. RGGB)."""
+        with self.rawpy.imread(path) as r:
+            c = r.raw_colors_visible[y0 % 2:y0 % 2 + 2, x0 % 2:x0 % 2 + 2].ravel()
+            desc = r.color_desc.decode()
+        return "".join(desc[int(k)] for k in c)
+
+    def develop(self, path, box=None, bits=16):
+        """The box (x, y, w, h), or the whole frame, as an HxW uint16 array of sensor
+        values (bits is ignored: the sensor values are 16-bit)."""
+        import numpy as np
+        self._remember(path)
+        with self.rawpy.imread(path) as r:
+            v = r.raw_image_visible
+            if box:
+                x, y, w, h = box
+                v = v[y:y + h, x:x + w]
+            return np.array(v, dtype=np.uint16, copy=True)
+
+    def cleanup(self):
+        pass
+
+
 class ScaledCam:
     """A Metashape camera whose pixel coordinates are scaled by k - for a project
     aligned on downscaled renditions (e.g. 0.3x TIFFs) while the pixels are developed
@@ -487,7 +546,7 @@ def georeference_tiff(path, gcps, epsg, log=print):
 
 
 # ---------------------------------------------------------------------------
-# IIQ conversion (tab 1)
+# IIQ conversion (tab 2)
 # ---------------------------------------------------------------------------
 def convert_folder(p, log, progress, cancel):
     """p: iiq_dir, recursive, out_dir, fmt ('tiff'|'geotiff'|'jpg'), bits, settings,
@@ -892,13 +951,19 @@ def build_convert_tab(parent):
 # ---------------------------------------------------------------------------
 # Tab: IIQ plot extraction
 # ---------------------------------------------------------------------------
-COMPRESS = ["LZW (lossless, smaller)", "None (uncompressed)"]
+COMPRESS = ["Deflate (lossless, smallest)", "LZW (lossless)", "None (uncompressed)"]
 
 
 def compress_key(label):
-    """'lzw' or 'none' from a COMPRESS label (or the key itself)."""
-    return "none" if str(label).lower().startswith(("none", "unc")) else "lzw"
+    """'deflate', 'lzw' or 'none' from a COMPRESS label (or the key itself)."""
+    s = str(label or "").strip().lower()
+    if s.startswith(("none", "unc")):
+        return "none"
+    return "lzw" if s.startswith("lzw") else "deflate"
 
+
+PIXELS = ["Developed RGB (Phase One ImageSDK, settings below)",
+          "Raw sensor values (Bayer mosaic, 16-bit, not developed: nothing lost or changed)"]
 
 STYLES = {"Masked to the plot (developed pixels, outside black)": "mask",
           "Bounding box (developed pixels, no mask)": "bbox",
@@ -917,7 +982,7 @@ def run_iiq_extraction(p, log, progress, cancel):
     try:
         import recipe as rcp
         rcp.write_recipe(p["outdir"], "plot_extraction",
-                         params=dict(p, tab="5 IIQ plot extraction"), log=log)
+                         params=dict(p, tab="3b Direct from IIQ"), log=log)
     except Exception as e:
         log(f"[!] recipe: {e}")
     return pe.run_extraction(p, log, progress, cancel)
@@ -937,6 +1002,7 @@ def build_iiq_extract_tab(parent):
          "custom": tk.StringVar(value=g("custom")),
          "style": tk.StringVar(value=g("style", list(STYLES)[0])),
          "margin": tk.StringVar(value=g("margin", "0.10")),
+         "pixels": tk.StringVar(value=g("pixels", PIXELS[0])),
          "fmt": tk.StringVar(value=g("fmt", "GeoTIFF (geotagged, lossless)")),
          "bits": tk.StringVar(value=g("bits", "8")),
          "compress": tk.StringVar(value=g("compress", COMPRESS[0])),
@@ -965,7 +1031,7 @@ def build_iiq_extract_tab(parent):
         except Exception:
             pass
     r = _path_row(frm, r, "Plot grid *", V["plots"], "file",
-                  "default: the grid made in tab 1 or edited in tab 2; Browse to use another",
+                  "default: the grid made in tab 1a or edited in tab 1b; Browse to use another",
                   [("Plots", "*.shp *.geojson *.json *.gpkg"), ("All", "*.*")], fill_ids)
     ttk.Label(frm, text="Plot ID field").grid(row=r, column=0, sticky="w", pady=2)
     idcb.grid(row=r, column=1, sticky="w", padx=6)
@@ -975,6 +1041,10 @@ def build_iiq_extract_tab(parent):
                   "the raw .IIQ files of the flight (only read); matched to the cameras "
                   "by file name")
     r = _path_row(frm, r, "Output folder *", V["out"], "dir")
+    ttk.Label(frm, text="Pixels").grid(row=r, column=0, sticky="w", pady=2)
+    ttk.Combobox(frm, textvariable=V["pixels"], state="readonly", width=78,
+                 values=PIXELS).grid(row=r, column=1, columnspan=2, sticky="w", padx=6)
+    r += 1
     r = _settings_rows(frm, r, V)
     ttk.Label(frm, text="Crop").grid(row=r, column=0, sticky="w", pady=2)
     o = ttk.Frame(frm)
@@ -994,7 +1064,7 @@ def build_iiq_extract_tab(parent):
     ttk.Combobox(o2, textvariable=V["bits"], state="readonly", width=3,
                  values=["8", "16"]).pack(side="left")
     ttk.Label(o2, text="  TIFF compression").pack(side="left")
-    ttk.Combobox(o2, textvariable=V["compress"], state="readonly", width=22,
+    ttk.Combobox(o2, textvariable=V["compress"], state="readonly", width=26,
                  values=COMPRESS).pack(side="left")
     r += 1
     o2 = ttk.Frame(frm)
@@ -1008,10 +1078,12 @@ def build_iiq_extract_tab(parent):
     ttk.Label(frm, foreground="#555", justify="left", wraplength=640, text=(
         "Frame per plot: a photo that holds the WHOLE plot (the most nadir/central of "
         "those); if no photo holds the whole plot, the photo holding the largest part of "
-        "it. The chosen box is then developed from that photo's IIQ. "
+        "it. The chosen box is then developed from that photo's IIQ, or - Pixels = raw "
+        "sensor values - copied from it undeveloped (one 16-bit band, Bayer pattern in the "
+        "PE_CFA_PATTERN tag; no Phase One SDK needed). "
         "Bits: 8 (0-255) or 16 (0-65535, from the same development; Masked or Bounding "
-        "box, TIFF/GeoTIFF/PNG). Compression: LZW and uncompressed hold identical pixels; "
-        "LZW files are smaller.")).grid(
+        "box, TIFF/GeoTIFF/PNG). Compression: Deflate, LZW and uncompressed hold identical "
+        "pixels; Deflate files are the smallest (16-bit LZW can be larger than uncompressed).")).grid(
         row=r, column=1, columnspan=2, sticky="w", padx=6, pady=(2, 4))
     r += 1
     r = _epsg_row(frm, r, V, "CRS of the GeoTIFF georeference")
@@ -1030,6 +1102,7 @@ def build_iiq_extract_tab(parent):
                  bits=V["bits"].get(), compress=compress_key(V["compress"].get()),
                  workers=V["workers"].get().strip() or "4", auto_fit=False,
                  frame_choice="whole_first", raw_source="iiq",
+                 iiq_pixels="raw_sensor" if V["pixels"].get() == PIXELS[1] else "developed",
                  gcp_epsg=V["epsg"].get().strip(),
                  iiq_settings=preset_path(V["preset"].get(), V["custom"].get().strip()),
                  iiq_sdk=V["sdk"].get().strip())
@@ -1044,7 +1117,7 @@ def build_iiq_extract_tab(parent):
 # ---------------------------------------------------------------------------
 ACK_SECTIONS = [
     ("IIQ plot extraction: approach by the APPN node at The University of Queensland", [
-        "The IIQ plot extraction (tab 5) follows the PhaseOne_Pipeline of the Australian Plant "
+        "The direct IIQ plot extraction (tab 3b) follows the PhaseOne_Pipeline of the Australian Plant "
         "Phenomics Network (APPN), The University of Queensland node (APPN-UQ; "
         "appn@uq.edu.au; MIT licence, Copyright (c) 2025 APPN-UQ). Their method: convert the "
         "IIQ files to 0.3-scale TIFFs, align them in Metashape, back-project the four corners "
@@ -1075,17 +1148,18 @@ ACK_SECTIONS = [
         "Safety and checks: output inside the IIQ folder is refused, every IIQ used is "
         "re-checked unchanged after the run, and the QA tab re-develops each box from the "
         "IIQ and compares it with the saved crop.",
-        "IIQ conversion (tab 3): whole IIQ frames to TIFF / GeoTIFF / JPEG, GeoTIFFs "
+        "IIQ file conversion (tab 2): whole IIQ frames to TIFF / GeoTIFF / JPEG, GeoTIFFs "
         "georeferenced from the aligned cameras."]),
     ("Phase One", [
-        "Pixels in tabs 3 and 5 are developed by the Phase One ImageSDK (Copyright Phase One "
+        "Pixels in tabs 2 and 3b are developed by the Phase One ImageSDK (Copyright Phase One "
         "A/S), used under Phase One's SDK licence. The SDK runtime is not part of the public "
         "source code. The Phase One SDK use at DPIRD follows the approval obtained for the "
         "DPIRD IIQ converter (github.com/appndpird/P1ImageSDK-IIQ-Converter, Bipul Neupane)."]),
     ("Everything else", [
-        "All other parts of PlotExtractor - plot grid generation and editing (tabs 1 and 2), "
-        "plot extraction from the Phase One JPEGs or the orthomosaic (tab 4), training tiles "
-        "and row detection (tab 6, after the PhenoFuse row method) and QA (tab 7) - were "
+        "All other parts of PlotExtractor - plot grid generation, editing and crop-row review "
+        "(tab 1, rows after the PhenoFuse row method), plot extraction from converted images "
+        "or the orthomosaic (tab 3a), tiles generation and row detection (tabs 4a and 4b, "
+        "after the PhenoFuse row method) and QA (tab 4c) - were "
         "developed by DPIRD for the APPN node in Western Australia."]),
 ]
 

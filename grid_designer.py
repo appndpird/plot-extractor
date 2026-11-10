@@ -341,6 +341,7 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
     v_pl = tk.StringVar(value='4.00')
     v_grow = tk.StringVar(value='0.20')
     v_grange = tk.StringVar(value='0.50')
+    v_crop = tk.StringVar(value='0')          # crop (seeder) rows inside each plot
     v_epsg = out_epsg_var if out_epsg_var is not None else tk.StringVar(value='7850')
 
     def _err(title, msg):
@@ -473,6 +474,9 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
                     sx, sy = w2s(x, y)
                     pts += [sx, sy]
                 cv.create_polygon(pts, outline='#33ddee', fill='', width=1)
+            for a, b in crop_lines():
+                (ax, ay), (bx, by) = w2s(*a), w2s(*b)
+                cv.create_line(ax, ay, bx, by, fill='#ffd23f', width=1)
             lab = labels()
             if len(corners) >= 2:
                 pts = []
@@ -638,6 +642,27 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
             return None
         return plots
 
+    def crop_n():
+        try:
+            return max(0, int(float(v_crop.get() or 0)))
+        except ValueError:
+            return 0
+
+    def _along():
+        # crop rows run along the plot LENGTH (p0 -> p3): the long side unless the
+        # plots are wider than long
+        return 'long' if _num(v_pl, 4.0) >= _num(v_pw, 1.0) else 'short'
+
+    def crop_lines():
+        n = crop_n()
+        if not (n and grid):
+            return []
+        import crop_rows
+        rows, _ = crop_rows.rows_from_count([pl['ring'] for pl in grid],
+                                            [pl['props']['Plot_ID'] for pl in grid], n,
+                                            along=_along())
+        return [r['line'] for r in rows]
+
     def preview():
         plots = build_grid()
         if not plots:
@@ -649,9 +674,12 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
             w, l = measure_plot_size(pl['ring'], src['mpx'], src['mpy'])
             ws.append(w)
             ls.append(l)
-        say("%d plots — mean plot %.3f m wide x %.3f m long (%s)"
+        n = crop_n()
+        say("%d plots — mean plot %.3f m wide x %.3f m long (%s)%s"
             % (len(plots), sum(ws) / len(ws), sum(ls) / len(ls),
-               'stretched to corners' if fit_var.get() else 'exact metres'))
+               'stretched to corners' if fit_var.get() else 'exact metres',
+               ("; %d crop rows per plot at %.2f cm (width / rows)"
+                % (n, 100.0 * sum(ws) / len(ws) / n)) if n else ''))
         redraw()
         return True
 
@@ -698,6 +726,16 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
                 if not path.lower().endswith('.shp'):
                     path += '.shp'
                 write_grid_shapefile(path, out_plots, out_crs)
+            n = crop_n()
+            if n:
+                import crop_rows
+                rows, pit = crop_rows.rows_from_count(
+                    [pl['ring'] for pl in out_plots],
+                    [pl['props']['Plot_ID'] for pl in out_plots], n, along=_along())
+                rp = crop_rows.write_rows(crop_rows.rows_path_for(path), rows,
+                                          prj_from=path)
+                log("Crop rows: %d per plot at %.2f cm -> %s (review / edit them in tab "
+                    "1c)" % (n, 100.0 * sorted(pit)[len(pit) // 2], rp))
         except Exception as e:
             _err("Save grid", "Could not save the grid:\n%s" % e)
             return None
@@ -796,11 +834,16 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
                     width=width).pack(anchor='w')
 
     field("Ranges (count)", v_ranges)
-    field("Rows per range (count)", v_rows)
-    field("Plot width across rows (m)", v_pw)
-    field("Plot length along range (m)", v_pl)
-    field("Gap between rows (m)", v_grow)
+    field("Plots per range (count)", v_rows)
+    field("Plot width across crop rows (m)", v_pw)
+    field("Plot length along crop rows (m)", v_pl)
+    field("Gap between plots in a range (m)", v_grow)
     field("Gap between ranges (m)", v_grange)
+    fcr = ttk.Frame(params)
+    fcr.pack(side='left', padx=(0, 10))
+    ttk.Label(fcr, text="Crop rows per plot (0 = none)", font=('Segoe UI', 8)).pack(anchor='w')
+    ttk.Spinbox(fcr, textvariable=v_crop, from_=0, to=60, increment=1, width=5,
+                command=lambda: redraw()).pack(anchor='w')
     ttk.Checkbutton(params, text="Stretch grid to fit the 4 clicked corners",
                     variable=fit_var).pack(side='left', padx=(4, 0))
     fe = ttk.Frame(params)
@@ -848,7 +891,7 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
         vars={'order': order_var, 'pan_mode': pan_mode, 'fit': fit_var,
               'ranges': v_ranges, 'rows': v_rows, 'plot_w': v_pw,
               'plot_l': v_pl, 'gap_row': v_grow, 'gap_range': v_grange,
-              'epsg': v_epsg},
+              'epsg': v_epsg, 'crop_rows': v_crop},
         load_ortho=load_ortho, preview=preview, save=save,
         build_grid=build_grid, add_corner=add_corner,
         clear_corners=clear_corners, undo_corner=undo_corner,

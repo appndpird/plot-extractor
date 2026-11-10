@@ -3,9 +3,9 @@
 Every run writes (or updates) PlotExtractor_recipe.json in its output folder, one
 section per step:
 
-    plot_extraction        tab 4 (Metashape project or orthomosaic) and tab 5 (IIQ)
-    plot_tiles             tab 6a - fixed-size ground tiles of the plot images
-    rows_and_row_tiles     tab 6b - whole rows and fixed-size tiles along each row
+    plot_extraction        tab 3a (converted images / orthomosaic) and tab 3b (direct IIQ)
+    plot_tiles             tab 4a - fixed-size ground tiles of the plot images
+    rows_and_row_tiles     tab 4b - whole rows and fixed-size tiles along each row
 
 A tiles run also copies the plot_extraction section of the run its plot images came
 from (the recipe next to RawCrops), so one file in the tiles folder records the whole

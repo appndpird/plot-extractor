@@ -15,6 +15,10 @@ for pkg in ("Metashape", "rasterio", "pyproj", "shapely", "PIL"):
         print("collect_all skip", pkg, e)
 
 hidden += collect_submodules("rasterio")
+# rawpy: only the LibRaw extension and its DLLs (not rawpy.enhance, which pulls in
+# scikit-image and imageio/ffmpeg)
+from PyInstaller.utils.hooks import collect_dynamic_libs
+binaries += collect_dynamic_libs("rawpy")
 hidden += ["PIL.ImageTk", "PIL.ImageCms", "PIL._tkinter_finder",
            "rasterio.sample", "rasterio._features", "rasterio.vrt",
            "rasterio.control", "shapely.geometry", "shapefile",
@@ -31,7 +35,11 @@ hidden += ["PIL.ImageTk", "PIL.ImageCms", "PIL._tkinter_finder",
            # run settings file (PlotExtractor_recipe.json)
            "recipe",
            # the IIQ tabs (Phase One SDK via iiq_tools\p1tool.exe)
-           "iiq"]
+           "iiq",
+           # crop rows (tab 1a / 1b) and the crop-row review tab (1c)
+           "crop_rows", "row_review",
+           # raw sensor values of the IIQ (tab 3b) - LibRaw
+           "rawpy", "rawpy._rawpy"]
 
 # app assets (logos + icon) -> _internal/assets, found via sys._MEIPASS
 datas += [(os.path.join(APP, "assets"), "assets")]
@@ -50,7 +58,8 @@ a = Analysis(
     hiddenimports=hidden,
     hookspath=[],
     runtime_hooks=[],
-    excludes=["matplotlib", "scipy", "pandas", "PyQt5", "PySide2", "PySide6",
+    excludes=["matplotlib", "scipy", "pandas", "skimage", "imageio", "imageio_ffmpeg",
+              "rawpy.enhance", "PyQt5", "PySide2", "PySide6",
               "IPython", "notebook", "pytest", "sphinx"],
     noarchive=False,
 )

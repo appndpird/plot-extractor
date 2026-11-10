@@ -1,0 +1,19 @@
+Found 1 GPUs in 0.148 sec (CUDA: 0.017 sec, OpenCL: 0.03 sec, Vulkan: 0.1 sec)
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0.013 sec
+Found 1 GPUs in 0.005 sec (CUDA: 0 sec, OpenCL: 0 sec, Vulkan: 0.004 sec)
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0.001 sec
+Found 1 GPUs in 0.003 sec (CUDA: 0 sec, OpenCL: 0 sec, Vulkan: 0.003 sec)
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0.001 sec
+a) tab 2 conversion tif16_full: 12768x9564 uint16
+a) tab 2 conversion tif16_half: 6384x4782 uint16
+b) tab 3a from tif16_full: 6/6 plots pixel-identical to the 3b crops; 6006 uint16 2192x7790 vs 2192x7790; 6005 uint16 2199x7733 vs 2199x7733; 6001 uint16 2395x7370 vs 2395x7370; 6003 uint16 2229x7663 vs 2229x7663; 6002 uint16 2257x7603 vs 2257x7603; 6004 uint16 2211x7708 vs 2211x7708
+   log: Raw images are 16-bit TIFFs: crops keep their 16 bits | Bit depth: 16-bit per channel; TIFF compression: Deflate (lossless)
+c) tab 3a from tif16_half: 0/6 plots line up with the 3b crops at half size (corr > 0.95); 6006 1096x3895 vs 3b 2192x7790 corr 0.882; 6005 1099x3867 vs 3b 2199x7733 corr 0.869; 6001 1198x3685 vs 3b 2395x7370 corr 0.871; 6003 1114x3832 vs 3b 2229x7663 corr 0.863; 6002 1129x3802 vs 3b 2257x7603 corr 0.827; 6004 1105x3854 vs 3b 2211x7708 corr 0.905
+   log: Project images 12768x9564, raw images 6384x4782: camera pixel coordinates scaled x0.5000 | Raw images are 16-bit TIFFs: crops keep their 16 bits | Bit depth: 16-bit per channel; TIFF compression: Deflate (lossless)
+d) tab 3b raw sensor values: 39 s
+d) QA re-read from the IIQs: {'IDENTICAL': 36}
+d) plot_6006.tif: 1 band uint16, CRS EPSG:7850, tags {'PE_CFA_PATTERN': 'GBRG', 'PIXEL_SOURCE': 'IIQ raw sensor values, LibRaw 0.22.1'}
+d) 36 raw-sensor GeoTIFFs (Deflate): 1036 MB

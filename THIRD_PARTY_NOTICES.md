@@ -40,3 +40,11 @@ source code. Where an application build includes the SDK runtime (`iiq_tools/sdk
 is there under Phase One's licence (its `PhaseOne_SDK_LICENSE.md` and
 `PhaseOne_SDK_CREDITS.md`, the third-party libraries used by the SDK, are included
 alongside) and may not be extracted or used on its own.
+
+## rawpy and LibRaw
+
+The raw sensor values of IIQ files (tab 3b, *Pixels = Raw sensor values*) are read with
+rawpy (https://github.com/letmaik/rawpy, MIT licence), which bundles LibRaw
+(https://www.libraw.org, Copyright (C) 2008-2024 LibRaw LLC; used under the GNU LGPL 2.1 /
+CDDL 1.0 dual licence). The application build includes rawpy's LibRaw library unmodified
+(`_internal/rawpy/raw_r.dll`); it can be replaced with another build of LibRaw.

@@ -1,0 +1,50 @@
+IIQ formats experiment - York 2025-06-25, 36 plots, direct IIQ extraction (bounding box, margin 0.10 m)
+
+A  16-bit containers (Neutral development)
+   GeoTIFF = TIFF (LZW): 36/36 plots pixel-identical
+   GeoTIFF = TIFF (uncompressed): 36/36
+   GeoTIFF = PNG: 36/36
+B  8-bit containers
+   GeoTIFF = TIFF: 36/36;  GeoTIFF = PNG: 36/36
+C  16 -> 8 bit
+   8-bit file = round(16-bit / 257): max diff 1, pixels differing (median) 22.4955 %
+   tonal levels used in a plot, green: 16-bit 65391-65535 vs 8-bit 256-256
+   rounding error of 8-bit: RMS 101 of 65535 (= 1/sqrt(12) of one 8-bit step)
+D  JPEG (quality 95) vs lossless 8-bit
+   PSNR median 32.6 dB (range 32.27-32.85), mean abs error 4.30/255, max 104/255, pixels changed 99.9 %
+E  development settings (APPN HR vs Neutral, same box)
+   mean abs difference 13.46/255, 99th pct 58.7/255
+   high-pass SD (green, 8-bit units): neutral 38.31 vs APPN HR 55.87
+   HR 8-bit = round(HR 16-bit / 257): max diff 2, pixels differing 24.2011 % (noise reduction not bit-repeatable)
+F  fidelity: the box developed again from the IIQ (Neutral, 16-bit) vs the saved GeoTIFF
+   plot 6006: identical (max diff 0)
+   plot 6005: identical (max diff 0)
+   plot 6001: identical (max diff 0)
+   plot 6003: identical (max diff 0)
+   plot 6002: identical (max diff 0)
+   plot 6004: identical (max diff 0)
+G  georeference of the GeoTIFFs
+   CRS EPSG:7850, pixel 0.501-0.597 mm, affine fit through 23 GCPs: residual mean 4.73 mm (median of plots), max 19.96 mm
+H  compression of the same pixels (plot 6006, 512 px tiles)
+   16-bit none              125.8 MB  write  0.09 s  read back identical: True
+   16-bit lzw+pred2         135.5 MB  write  0.95 s  read back identical: True
+   16-bit lzw               139.7 MB  write  0.91 s  read back identical: True
+   16-bit deflate+pred2      98.0 MB  write  2.08 s  read back identical: True
+   16-bit zstd+pred2         97.6 MB  write  0.26 s  read back identical: True
+   8-bit  none               62.9 MB  write  0.05 s  read back identical: True
+   8-bit  lzw+pred2          53.3 MB  write  0.55 s  read back identical: True
+   8-bit  lzw                65.3 MB  write  0.41 s  read back identical: True
+   8-bit  deflate+pred2      42.0 MB  write  1.23 s  read back identical: True
+   8-bit  zstd+pred2         41.6 MB  write  0.14 s  read back identical: True
+
+Files of the 36 plots (MB) and run times (s, incl. opening the project)
+   N16_geotiff        5778 MB   29.1 s
+   N16_tiff           5742 MB   18.2 s
+   N16_tiff_none      4376 MB   16.5 s
+   N16_png            4120 MB   121.7 s
+   N8_geotiff         2258 MB   18.5 s
+   N8_tiff            2272 MB   16.4 s
+   N8_png             1669 MB   21.3 s
+   N8_jpeg             526 MB   15.6 s
+   HR16_geotiff       5804 MB   23.6 s
+   HR8_geotiff        2112 MB   21.0 s

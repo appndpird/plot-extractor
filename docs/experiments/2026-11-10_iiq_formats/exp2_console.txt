@@ -1,0 +1,509 @@
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0.001 sec
+chunk Chunk 1 763 cameras
+photo paths re-pointed: 763
+ImportReference: path = F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\points.csv, columns = nxyz, delimiter = ,, skip_rows = 1, create_markers = on
+Imported 180 markers for 36 plots.
+Skipped plots (incomplete marker files): [1003, 1004, 1005, 1006, 6001, 6002]
+CoordinateFile saved: F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\CoordinateFile\CoordinateFile.csv
+Cropped POI 1001 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\1001.jpg
+Cropped POI 1002 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\1002.jpg
+Cropped POI 2001 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\2001.jpg
+Cropped POI 2002 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\2002.jpg
+Cropped POI 2003 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\2003.jpg
+Cropped POI 2004 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\2004.jpg
+Cropped POI 2005 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\2005.jpg
+Cropped POI 2006 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\2006.jpg
+Cropped POI 3001 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\3001.jpg
+Cropped POI 3002 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\3002.jpg
+Cropped POI 3003 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\3003.jpg
+Cropped POI 3004 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\3004.jpg
+Cropped POI 3005 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\3005.jpg
+Cropped POI 3006 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\3006.jpg
+Cropped POI 4001 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\4001.jpg
+Cropped POI 4002 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\4002.jpg
+Cropped POI 4003 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\4003.jpg
+Cropped POI 4004 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\4004.jpg
+Cropped POI 4005 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\4005.jpg
+Cropped POI 4006 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\4006.jpg
+Cropped POI 5001 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\5001.jpg
+Cropped POI 5002 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\5002.jpg
+Cropped POI 5003 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\5003.jpg
+Cropped POI 5004 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\5004.jpg
+Cropped POI 5005 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\5005.jpg
+Cropped POI 5006 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\5006.jpg
+Cropped POI 6003 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\6003.jpg
+Cropped POI 6004 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\6004.jpg
+Cropped POI 6005 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\6005.jpg
+Cropped POI 6006 -> F:\Ibrahim's Workspace2\Plot extraction processing\2025_Calibrationtrial_I_SIF_DPIRD\Experiment_2026-11-10_IIQ_formats\APPN_pipeline\BackProjector\Plot_Clip\6006.jpg
+Finished marker-check / plot-clip generation.
+back-projection 54 s; 30 of 36 plots have a camera with all 4 corners
+30 plots share cameras — splitting into 4 HR_clip runs.
+Running HR_clip.exe (17 plots)...
+Loaded crop for P0019611 -> x=2918 y=207 w=1977 h=8114
+Loaded crop for P0019770 -> x=350 y=106 w=2345 h=8506
+Loaded crop for P0019805 -> x=5465 y=677 w=2030 h=8401
+Loaded crop for P0019901 -> x=5633 y=186 w=2132 h=8707
+Loaded crop for P0019701 -> x=7041 y=1138 w=2010 h=8119
+Loaded crop for P0019871 -> x=2736 y=791 w=2256 h=8562
+Loaded crop for P0019697 -> x=7086 y=129 w=1924 h=7535
+Loaded crop for P0019777 -> x=5672 y=116 w=2015 h=7552
+Loaded crop for P0019798 -> x=5480 y=1693 w=2009 h=7530
+Loaded crop for P0019874 -> x=5287 y=792 w=2083 h=7934
+Loaded crop for P0019894 -> x=5553 y=59 w=2013 h=7877
+Loaded crop for P0019682 -> x=5668 y=1274 w=2100 h=8206
+Loaded crop for P0019693 -> x=4739 y=1001 w=2046 h=8094
+Loaded crop for P0019781 -> x=5354 y=295 w=2090 h=8262
+Loaded crop for P0019794 -> x=5264 y=912 w=2058 h=8272
+Loaded crop for P0019890 -> x=5429 y=815 w=2135 h=8571
+Loaded crop for P0019790 -> x=7345 y=2078 w=1882 h=7466
+Loaded 17 entries from CSV.
+Processing folder: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019794.IIQ"
+Converting with crop x=5264 y=912 w=2058 h=8272
+Op: CreateBaseProxy(Cuda) -  time: 22
+Op: CopyBayer(Cuda) -  time: 1
+Op: ClipWarning(Cuda) -  time: 3
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 11
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 5
+Op: ImgOpPreColorNoise(Cpu) -  time: 29
+Op: ImgOpShadowColorNoise(Cuda) -  time: 11
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 4
+Op: LocalToneMappingV8(Cuda) -  time: 38
+Op: ColorManagement(Cuda) -  time: 27
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019794_5004.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019871.IIQ"
+Converting with crop x=2736 y=791 w=2256 h=8562
+Op: CreateBaseProxy(Cuda) -  time: 0
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 3
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 32
+Op: ImgOpShadowColorNoise(Cuda) -  time: 9
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 3
+Op: LocalToneMappingV8(Cuda) -  time: 27
+Op: ColorManagement(Cuda) -  time: 26
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019871_3004.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019611.IIQ"
+Converting with crop x=2918 y=207 w=1977 h=8114
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 1
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 3
+Op: ImgOpPreColorNoise(Cpu) -  time: 26
+Op: ImgOpShadowColorNoise(Cuda) -  time: 8
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 18
+Op: ColorManagement(Cuda) -  time: 25
+Op: Tetrahedral(Cuda) -  time: 0
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019611_1001.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019701.IIQ"
+Converting with crop x=7041 y=1138 w=2010 h=8119
+Op: CreateBaseProxy(Cuda) -  time: 0
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 26
+Op: ImgOpShadowColorNoise(Cuda) -  time: 8
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 18
+Op: ColorManagement(Cuda) -  time: 24
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019701_3001.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019781.IIQ"
+Converting with crop x=5354 y=295 w=2090 h=8262
+Op: CreateBaseProxy(Cuda) -  time: 0
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 28
+Op: ImgOpShadowColorNoise(Cuda) -  time: 8
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 3
+Op: LocalToneMappingV8(Cuda) -  time: 27
+Op: ColorManagement(Cuda) -  time: 24
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019781_5003.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019770.IIQ"
+Converting with crop x=350 y=106 w=2345 h=8506
+Op: CreateBaseProxy(Cuda) -  time: 0
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 3
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 5
+Op: ImgOpPreColorNoise(Cpu) -  time: 30
+Op: ImgOpShadowColorNoise(Cuda) -  time: 9
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 29
+Op: ColorManagement(Cuda) -  time: 27
+Op: Tetrahedral(Cuda) -  time: 0
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019770_2001.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019805.IIQ"
+Converting with crop x=5465 y=677 w=2030 h=8401
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 26
+Op: ImgOpShadowColorNoise(Cuda) -  time: 9
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 27
+Op: ColorManagement(Cuda) -  time: 26
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019805_2004.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019798.IIQ"
+Converting with crop x=5480 y=1693 w=2009 h=7530
+Op: CreateBaseProxy(Cuda) -  time: 0
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 23
+Op: ImgOpShadowColorNoise(Cuda) -  time: 7
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 17
+Op: ColorManagement(Cuda) -  time: 22
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019798_4004.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019901.IIQ"
+Converting with crop x=5633 y=186 w=2132 h=8707
+Op: CreateBaseProxy(Cuda) -  time: 0
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 3
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 5
+Op: ImgOpPreColorNoise(Cpu) -  time: 29
+Op: ImgOpShadowColorNoise(Cuda) -  time: 9
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 3
+Op: LocalToneMappingV8(Cuda) -  time: 27
+Op: ColorManagement(Cuda) -  time: 26
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019901_2006.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019697.IIQ"
+Converting with crop x=7086 y=129 w=1924 h=7535
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 1
+Op: ClipWarning(Cuda) -  time: 1
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 22
+Op: ImgOpShadowColorNoise(Cuda) -  time: 5
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 17
+Op: ColorManagement(Cuda) -  time: 22
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019697_4001.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019777.IIQ"
+Converting with crop x=5672 y=116 w=2015 h=7552
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 3
+Op: ImgOpPreColorNoise(Cpu) -  time: 26
+Op: ImgOpShadowColorNoise(Cuda) -  time: 7
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 17
+Op: ColorManagement(Cuda) -  time: 23
+Op: Tetrahedral(Cuda) -  time: 0
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019777_4003.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019874.IIQ"
+Converting with crop x=5287 y=792 w=2083 h=7934
+Op: CreateBaseProxy(Cuda) -  time: 0
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 28
+Op: ImgOpShadowColorNoise(Cuda) -  time: 7
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 3
+Op: LocalToneMappingV8(Cuda) -  time: 18
+Op: ColorManagement(Cuda) -  time: 24
+Op: Tetrahedral(Cuda) -  time: 0
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019874_4005.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019894.IIQ"
+Converting with crop x=5553 y=59 w=2013 h=7877
+Op: CreateBaseProxy(Cuda) -  time: 0
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 25
+Op: ImgOpShadowColorNoise(Cuda) -  time: 7
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 18
+Op: ColorManagement(Cuda) -  time: 23
+Op: Tetrahedral(Cuda) -  time: 0
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019894_4006.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019682.IIQ"
+Converting with crop x=5668 y=1274 w=2100 h=8206
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 28
+Op: ImgOpShadowColorNoise(Cuda) -  time: 8
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 3
+Op: LocalToneMappingV8(Cuda) -  time: 26
+Op: ColorManagement(Cuda) -  time: 25
+Op: Tetrahedral(Cuda) -  time: 0
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019682_5001.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019693.IIQ"
+Converting with crop x=4739 y=1001 w=2046 h=8094
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 28
+Op: ImgOpShadowColorNoise(Cuda) -  time: 7
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 18
+Op: ColorManagement(Cuda) -  time: 24
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019693_5002.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019890.IIQ"
+Converting with crop x=5429 y=815 w=2135 h=8571
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 1
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 31
+Op: ImgOpShadowColorNoise(Cuda) -  time: 9
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 3
+Op: LocalToneMappingV8(Cuda) -  time: 27
+Op: ColorManagement(Cuda) -  time: 26
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019890_5006.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019790.IIQ"
+Converting with crop x=7345 y=2078 w=1882 h=7466
+Op: CreateBaseProxy(Cuda) -  time: 0
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 3
+Op: ImgOpPreColorNoise(Cpu) -  time: 26
+Op: ImgOpShadowColorNoise(Cuda) -  time: 6
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 16
+Op: ColorManagement(Cuda) -  time: 22
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019790_6003.tiff"
+Done. Processed: 17 | Not found: 0
+Running HR_clip.exe (8 plots)...
+Loaded crop for P0019611 -> x=649 y=334 w=1997 h=8052
+Loaded crop for P0019770 -> x=2747 y=204 w=2283 h=8457
+Loaded crop for P0019805 -> x=3152 y=606 w=2005 h=8371
+Loaded crop for P0019701 -> x=4844 y=1076 w=1979 h=8091
+Loaded crop for P0019871 -> x=5156 y=907 w=2191 h=8518
+Loaded crop for P0019697 -> x=4864 y=114 w=1904 h=7337
+Loaded crop for P0019794 -> x=3158 y=903 w=2041 h=8275
+Loaded crop for P0019790 -> x=5230 y=2033 w=1869 h=7453
+Loaded 8 entries from CSV.
+Processing folder: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019794.IIQ"
+Converting with crop x=3158 y=903 w=2041 h=8275
+Op: CreateBaseProxy(Cuda) -  time: 2
+Op: CopyBayer(Cuda) -  time: 1
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 3
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 5
+Op: ImgOpPreColorNoise(Cpu) -  time: 30
+Op: ImgOpShadowColorNoise(Cuda) -  time: 11
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 4
+Op: LocalToneMappingV8(Cuda) -  time: 27
+Op: ColorManagement(Cuda) -  time: 26
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019794_5005.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019871.IIQ"
+Converting with crop x=5156 y=907 w=2191 h=8518
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 1
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 43
+Op: ImgOpShadowColorNoise(Cuda) -  time: 9
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 28
+Op: ColorManagement(Cuda) -  time: 26
+Op: Tetrahedral(Cuda) -  time: 0
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019871_3005.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019611.IIQ"
+Converting with crop x=649 y=334 w=1997 h=8052
+Op: CreateBaseProxy(Cuda) -  time: 0
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 26
+Op: ImgOpShadowColorNoise(Cuda) -  time: 7
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 18
+Op: ColorManagement(Cuda) -  time: 23
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019611_1002.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019701.IIQ"
+Converting with crop x=4844 y=1076 w=1979 h=8091
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 29
+Op: ImgOpShadowColorNoise(Cuda) -  time: 6
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 17
+Op: ColorManagement(Cuda) -  time: 25
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019701_3002.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019770.IIQ"
+Converting with crop x=2747 y=204 w=2283 h=8457
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 1
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 6
+Op: ImgOpPreColorNoise(Cpu) -  time: 82
+Op: ImgOpShadowColorNoise(Cuda) -  time: 10
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 28
+Op: ColorManagement(Cuda) -  time: 26
+Op: Tetrahedral(Cuda) -  time: 0
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019770_2002.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019805.IIQ"
+Converting with crop x=3152 y=606 w=2005 h=8371
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 27
+Op: ImgOpShadowColorNoise(Cuda) -  time: 8
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 3
+Op: LocalToneMappingV8(Cuda) -  time: 25
+Op: ColorManagement(Cuda) -  time: 26
+Op: Tetrahedral(Cuda) -  time: 0
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019805_2005.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019697.IIQ"
+Converting with crop x=4864 y=114 w=1904 h=7337
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 3
+Op: ImgOpPreColorNoise(Cpu) -  time: 23
+Op: ImgOpShadowColorNoise(Cuda) -  time: 6
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 16
+Op: ColorManagement(Cuda) -  time: 22
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019697_4002.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019790.IIQ"
+Converting with crop x=5230 y=2033 w=1869 h=7453
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 1
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 26
+Op: ImgOpShadowColorNoise(Cuda) -  time: 5
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 16
+Op: ColorManagement(Cuda) -  time: 23
+Op: Tetrahedral(Cuda) -  time: 0
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019790_6004.tiff"
+Done. Processed: 8 | Not found: 0
+Running HR_clip.exe (4 plots)...
+Loaded crop for P0019770 -> x=4977 y=267 w=2230 h=8418
+Loaded crop for P0019701 -> x=2738 y=1052 w=1955 h=8070
+Loaded crop for P0019871 -> x=7461 y=948 w=2135 h=8489
+Loaded crop for P0019790 -> x=3097 y=2007 w=1861 h=7436
+Loaded 4 entries from CSV.
+Processing folder: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019701.IIQ"
+Converting with crop x=2738 y=1052 w=1955 h=8070
+Op: CreateBaseProxy(Cuda) -  time: 2
+Op: CopyBayer(Cuda) -  time: 1
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 3
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 5
+Op: ImgOpPreColorNoise(Cpu) -  time: 39
+Op: ImgOpShadowColorNoise(Cuda) -  time: 8
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 3
+Op: LocalToneMappingV8(Cuda) -  time: 18
+Op: ColorManagement(Cuda) -  time: 26
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019701_3003.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019770.IIQ"
+Converting with crop x=4977 y=267 w=2230 h=8418
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 3
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 3
+Op: ImgOpPreColorNoise(Cpu) -  time: 66
+Op: ImgOpShadowColorNoise(Cuda) -  time: 9
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 3
+Op: LocalToneMappingV8(Cuda) -  time: 28
+Op: ColorManagement(Cuda) -  time: 26
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019770_2003.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019871.IIQ"
+Converting with crop x=7461 y=948 w=2135 h=8489
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 1
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 4
+Op: ImgOpPreColorNoise(Cpu) -  time: 30
+Op: ImgOpShadowColorNoise(Cuda) -  time: 9
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 3
+Op: LocalToneMappingV8(Cuda) -  time: 27
+Op: ColorManagement(Cuda) -  time: 26
+Op: Tetrahedral(Cuda) -  time: 0
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019871_3006.tiff"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019790.IIQ"
+Converting with crop x=3097 y=2007 w=1861 h=7436
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 0
+Op: ClipWarning(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 2
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 3
+Op: ImgOpPreColorNoise(Cpu) -  time: 25
+Op: ImgOpShadowColorNoise(Cuda) -  time: 5
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 2
+Op: LocalToneMappingV8(Cuda) -  time: 16
+Op: ColorManagement(Cuda) -  time: 22
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019790_6005.tiff"
+Done. Processed: 4 | Not found: 0
+Running HR_clip.exe (1 plots)...
+Loaded crop for P0019790 -> x=1075 y=1950 w=1855 h=7437
+Loaded 1 entries from CSV.
+Processing folder: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images"
+Opening: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\P0019790.IIQ"
+Converting with crop x=1075 y=1950 w=1855 h=7437
+Op: CreateBaseProxy(Cuda) -  time: 1
+Op: CopyBayer(Cuda) -  time: 1
+Op: ClipWarning(Cuda) -  time: 1
+Op: CImgOpBayerDemosaicGreen(Cuda) -  time: 3
+Op: CImgOpBayerDemosaicRedBlue(Cuda) -  time: 5
+Op: ImgOpPreColorNoise(Cpu) -  time: 26
+Op: ImgOpShadowColorNoise(Cuda) -  time: 9
+Op: ImgOpColorNoiseReduction(Cuda) -  time: 3
+Op: LocalToneMappingV8(Cuda) -  time: 17
+Op: ColorManagement(Cuda) -  time: 23
+Op: Tetrahedral(Cuda) -  time: 1
+Saved: "F:\\Ibrahim's Workspace2\\Plot extraction processing\\2025_Calibrationtrial_I_SIF_DPIRD\\Experiment_2026-11-10_IIQ_formats\\APPN_pipeline\\Images\\output_hr\\P0019790_6006.tiff"
+Done. Processed: 1 | Not found: 0
+HR_clip.exe finished.
+copied 17 IIQs in 0 s; HR_clip 13 s

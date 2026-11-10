@@ -697,6 +697,55 @@ def read_psx_chunks(psx_path):
         return [], None
 
 
+_DTYPE_CACHE = {}
+
+
+def _tif_dtype(path):
+    """Sample type of a TIFF ('uint8', 'uint16', ...), None for other files."""
+    if not str(path).lower().endswith(('.tif', '.tiff')):
+        return None
+    if path not in _DTYPE_CACHE:
+        try:
+            import rasterio
+            with rasterio.open(path) as d:
+                _DTYPE_CACHE[path] = d.dtypes[0]
+        except Exception:
+            _DTYPE_CACHE[path] = None
+    return _DTYPE_CACHE[path]
+
+
+def _image_size(path):
+    """(width, height) of an image without decoding it."""
+    if _tif_dtype(path):
+        import rasterio
+        with rasterio.open(path) as d:
+            return d.width, d.height
+    from PIL import Image
+    with Image.open(path) as im:
+        return im.size
+
+
+def _read_box(path, x0=0, y0=0, w=None, h=None):
+    """HxWx3 array of a TIFF (bands 1-3), whole or the box, values unchanged."""
+    import warnings
+    import rasterio
+    from rasterio.windows import Window
+    with warnings.catch_warnings():
+        warnings.simplefilter('ignore')
+        with rasterio.open(path) as d:
+            win = None if w is None else Window(x0, y0, w, h)
+            a = d.read([1, 2, 3] if d.count >= 3 else [1, 1, 1], window=win)
+    return a.transpose(1, 2, 0)
+
+
+def _to8(arr):
+    """16-bit -> 8-bit, round(value / 257) (65535 -> 255)."""
+    import numpy as np
+    if arr.dtype == np.uint8:
+        return arr
+    return np.clip(np.round(arr.astype(np.float32) / 257.0), 0, 255).astype(np.uint8)
+
+
 def run_extraction(p, log, set_progress, cancel):
     """p: dict of parameters. log(str), set_progress(done,total), cancel: threading.Event"""
     import Metashape as ms
@@ -885,8 +934,9 @@ def run_extraction(p, log, set_progress, cancel):
             return out
 
     # pixel source: the image files (JPEG/TIFF renditions, default) or the IIQ raw
-    # files developed by the Phase One SDK (IIQ plot extraction tab, iiq.py)
+    # files developed by the Phase One SDK (tab 3b Direct from IIQ, iiq.py)
     iiq_mode = (p.get('raw_source') or 'image').lower() == 'iiq'
+    raw_cfa = iiq_mode and str(p.get('iiq_pixels') or '').lower() in ('cfa', 'raw_sensor')
     iiq_dev = None
     _exts = RAW_EXTS
     if iiq_mode:
@@ -895,20 +945,31 @@ def run_extraction(p, log, set_progress, cancel):
             raise RuntimeError("IIQ extraction needs the folder with the .IIQ files.")
         _iiq.assert_safe_output([p['rawdir']], p['outdir'])
         os.makedirs(p['outdir'], exist_ok=True)
-        iiq_dev = _iiq.Developer(p.get('iiq_settings'),
-                                 os.path.join(p['outdir'], '_iiq_work'),
-                                 p.get('iiq_sdk', ''), log, parallel=2)
-        shutil.copy2(p['iiq_settings'], os.path.join(p['outdir'], 'IIQ_settings_used.json'))
-        with open(os.path.join(p['outdir'], 'IIQ_run.json'), 'w') as _f:
-            json.dump(dict(iiq_dir=p['rawdir'], settings=p['iiq_settings'],
-                           sdk_root=iiq_dev.sdk['root'],
-                           sdk_version=iiq_dev.sdk.get('version', '')), _f, indent=1)
         _exts = _iiq.IIQ_EXTS
-        log(_iiq.CREDIT)
-        log("Pixel source: IIQ raw files developed by the Phase One ImageSDK  ("
-            + _iiq.sdk_status(p.get('iiq_sdk', ''))[1] + ")")
-        log(f"Development settings: {os.path.basename(p['iiq_settings'])} "
-            "(copy: IIQ_settings_used.json)")
+        if raw_cfa:
+            # the sensor values themselves (LibRaw): nothing developed, nothing lost
+            iiq_dev = _iiq.RawSensor(log)
+            with open(os.path.join(p['outdir'], 'IIQ_run.json'), 'w') as _f:
+                json.dump(dict(iiq_dir=p['rawdir'], pixels='raw_sensor',
+                               settings=iiq_dev.settings, sdk_root=iiq_dev.sdk['root'],
+                               sdk_version=iiq_dev.sdk['version']), _f, indent=1)
+            log("Pixel source: IIQ RAW SENSOR VALUES (Bayer colour filter mosaic, 16-bit, "
+                f"not developed; read with {iiq_dev.sdk['version']}). One band per image; "
+                "the Bayer pattern of each box is in the PE_CFA_PATTERN tag.")
+        else:
+            iiq_dev = _iiq.Developer(p.get('iiq_settings'),
+                                     os.path.join(p['outdir'], '_iiq_work'),
+                                     p.get('iiq_sdk', ''), log, parallel=2)
+            shutil.copy2(p['iiq_settings'], os.path.join(p['outdir'], 'IIQ_settings_used.json'))
+            with open(os.path.join(p['outdir'], 'IIQ_run.json'), 'w') as _f:
+                json.dump(dict(iiq_dir=p['rawdir'], pixels='developed',
+                               settings=p['iiq_settings'], sdk_root=iiq_dev.sdk['root'],
+                               sdk_version=iiq_dev.sdk.get('version', '')), _f, indent=1)
+            log(_iiq.CREDIT)
+            log("Pixel source: IIQ raw files developed by the Phase One ImageSDK  ("
+                + _iiq.sdk_status(p.get('iiq_sdk', ''))[1] + ")")
+            log(f"Development settings: {os.path.basename(p['iiq_settings'])} "
+                "(copy: IIQ_settings_used.json)")
 
     # raw image fallback index (basename and stem, lowercase)
     raw_index = {}
@@ -961,6 +1022,26 @@ def run_extraction(p, log, set_progress, cancel):
             cams = [_iiq.ScaledCam(c, kx) for c in cams]
             log(f"Project images {sw}x{sh}, IIQ frames {iw}x{ih}: camera pixel "
                 f"coordinates scaled x{kx:.4f}")
+    elif p.get('do_raw', True) and p.get('rawdir'):
+        # Indirect: frames converted in tab 2 may be another size than the photos
+        # the project was aligned on (e.g. full-size TIFFs, project on 0.3x copies):
+        # scale the camera pixel coordinates the same way as for the IIQs.
+        _have = next((c for c in cams if resolve_photo(c)), None)
+        if _have is not None:
+            try:
+                iw, ih = _image_size(resolve_photo(_have))
+                sw, sh = _have.sensor.width, _have.sensor.height
+                kx, ky = iw / float(sw), ih / float(sh)
+                if abs(kx - ky) > 0.01 * kx:
+                    log(f"[!] raw images are {iw}x{ih} but the project's are {sw}x{sh} "
+                        "(different shape) - crops may be misplaced")
+                elif abs(kx - 1.0) > 1e-3:
+                    import iiq as _iiqs
+                    cams = [_iiqs.ScaledCam(c, kx) for c in cams]
+                    log(f"Project images {sw}x{sh}, raw images {iw}x{ih}: camera pixel "
+                        f"coordinates scaled x{kx:.4f}")
+            except Exception as e:
+                log(f"[!] could not read the raw image size: {e}")
 
     do_raw = bool(p.get('do_raw', True))
     do_ortho = bool(p.get('do_ortho', False))
@@ -1051,16 +1132,28 @@ def run_extraction(p, log, set_progress, cancel):
     # bit depth (16 only for IIQ development) and TIFF compression; LZW and
     # uncompressed hold identical pixels, LZW files are just smaller
     bits = 16 if str(p.get('bits') or '8').strip() == '16' else 8
-    compress = ('none' if str(p.get('compress') or 'lzw').lower().startswith(('none', 'unc'))
-                else 'lzw')
+    compress = _compress_key(p.get('compress') or 'deflate')
     if ext == '.tif' and compress == 'none':
         save_kw = {}
-    if bits == 16:
-        if not iiq_mode:
-            log("[!] 16-bit output needs the IIQ raw files (IIQ plot extraction tab); "
-                "the JPEG/TIFF renditions are 8-bit - writing 8-bit")
+    if raw_cfa:
+        if ext == '.jpg':
+            raise RuntimeError("Raw sensor values are 16-bit: choose GeoTIFF, TIFF or PNG.")
+        if raw_mode not in ('mask', 'bbox'):
+            raise RuntimeError("Raw sensor values are kept for the 'Masked to the plot' and "
+                               "'Bounding box' styles (a rectified crop would resample them).")
+        bits = 16
+    src16 = False
+    if bits == 16 and not iiq_mode:
+        _first = next((resolve_photo(c) for c in cams if resolve_photo(c)), None)
+        src16 = bool(_first and _tif_dtype(_first) == 'uint16')
+        if not src16:
+            log("[!] 16-bit output needs 16-bit sources: the IIQs (tab 3b) or 16-bit TIFFs "
+                "converted in tab 2; these raw images are 8-bit - writing 8-bit")
             bits = 8
-        elif ext == '.jpg':
+        else:
+            log("Raw images are 16-bit TIFFs: crops keep their 16 bits")
+    if bits == 16:
+        if ext == '.jpg':
             raise RuntimeError("JPEG is 8-bit only: choose GeoTIFF, TIFF or PNG for "
                                "16-bit output.")
         elif raw_mode not in ('mask', 'bbox'):
@@ -1072,7 +1165,8 @@ def run_extraction(p, log, set_progress, cancel):
             auto_fit = False
     if ext == '.tif':
         log(f"Bit depth: {bits}-bit per channel; TIFF compression: "
-            + ("LZW (lossless)" if compress == 'lzw' else "none (uncompressed)"))
+            + {'deflate': "Deflate (lossless)", 'lzw': "LZW (lossless)",
+               'none': "none (uncompressed)"}[compress])
     elif bits == 16:
         log("Bit depth: 16-bit per channel")
 
@@ -1129,6 +1223,9 @@ def run_extraction(p, log, set_progress, cancel):
         # is transient (one per in-flight frame, ~150 MB) and is freed once decoded.
         if iiq_dev is not None and path.lower().endswith(_iiq.IIQ_EXTS):
             im = Image.fromarray(iiq_dev.develop(path), 'RGB')   # whole frame from IIQ
+            icc = None
+        elif _tif_dtype(path) == 'uint16':
+            im = Image.fromarray(_to8(_read_box(path)), 'RGB')     # 8-bit for resampling
             icc = None
         else:
             import io as _io
@@ -1197,9 +1294,12 @@ def run_extraction(p, log, set_progress, cancel):
             pass
         tags['SOURCE_IMAGE'] = path
         if iiq_dev is not None and path.lower().endswith(_iiq.IIQ_EXTS):
-            tags['PIXEL_SOURCE'] = ('IIQ developed by Phase One ImageSDK '
-                                    + (iiq_dev.sdk.get('version') or ''))
-            tags['IIQ_SETTINGS'] = os.path.basename(iiq_dev.settings)
+            if raw_cfa:
+                tags['PIXEL_SOURCE'] = 'IIQ raw sensor values, ' + iiq_dev.sdk['version']
+            else:
+                tags['PIXEL_SOURCE'] = ('IIQ developed by Phase One ImageSDK '
+                                        + (iiq_dev.sdk.get('version') or ''))
+                tags['IIQ_SETTINGS'] = os.path.basename(iiq_dev.settings)
         with _exif_lock:
             exif_cache[path] = tags
         return tags
@@ -1514,6 +1614,19 @@ def run_extraction(p, log, set_progress, cancel):
                                            f"{arr.shape[0]}, expected {bw}x{bh}")
                     # 16-bit stays a numpy array (PIL has no 16-bit RGB mode)
                     crop = arr if bits == 16 else Image.fromarray(arr, 'RGB')
+                    if raw_cfa:
+                        job['cfa_pattern'] = iiq_dev.pattern(job['path'], job['x0'],
+                                                             job['y0'])
+                elif _tif_dtype(job['path']) == 'uint16':
+                    # 16-bit rendition (tab 2): read just the box, pixels unchanged;
+                    # 8-bit output = round(value / 257)
+                    icc = None
+                    arr = _read_box(job['path'], job['x0'], job['y0'],
+                                    job['x1'] - job['x0'], job['y1'] - job['y0'])
+                    if bits == 16:
+                        crop = arr
+                    else:
+                        crop = Image.fromarray(_to8(arr), 'RGB')
                 else:
                     im, icc = load_image(job['path'])
                     crop = im.crop((job['x0'], job['y0'], job['x1'], job['y1']))
@@ -1527,7 +1640,8 @@ def run_extraction(p, log, set_progress, cancel):
                     ImageDraw.Draw(mk).polygon([tuple(q) for q in mpoly], fill=255)
                     if deep:            # same mask, numpy: values inside are untouched
                         import numpy as np
-                        crop = np.where(np.asarray(mk)[..., None] > 0, crop,
+                        m_ = np.asarray(mk) > 0
+                        crop = np.where(m_ if crop.ndim == 2 else m_[..., None], crop,
                                         0).astype(crop.dtype)
                     else:
                         crop = Image.composite(crop, Image.new('RGB', crop.size, (0, 0, 0)), mk)
@@ -1540,13 +1654,20 @@ def run_extraction(p, log, set_progress, cancel):
                     crop = to_srgb_crop(crop, icc)
             if job.get('auto_fit'):
                 crop = _apply_auto_fit(crop, job)
+            cfa_tags = None
+            if job.get('cfa_pattern'):
+                cfa_tags = dict(PE_PIXELS='raw sensor values (Bayer colour filter), not developed',
+                                PE_CFA_PATTERN=job['cfa_pattern'],
+                                PE_SRC_BOX=f"{job['x0']},{job['y0']},{job['x1']},{job['y1']}")
             if job['geotag']:
                 # embed the source ICC only when pixels were NOT converted to
                 # sRGB (converted pixels are sRGB, the default assumption)
-                save_geotiff(job['out'], crop, job['gcps'], exif_tags(job['path']),
-                             log, embed_icc=not to_srgb, compress=compress)
+                save_geotiff(job['out'], crop, job['gcps'],
+                             dict(exif_tags(job['path']), **(cfa_tags or {})),
+                             log, embed_icc=not to_srgb and not cfa_tags, compress=compress)
             elif ext == '.tif' or not isinstance(crop, Image.Image):
-                write_plain_image(job['out'], crop, compress)   # GDAL: 8/16-bit TIFF, PNG
+                write_plain_image(job['out'], crop, compress,   # GDAL: 8/16-bit TIFF, PNG
+                                  tags=cfa_tags)
             else:
                 crop.save(job['out'], **save_kw)
             return (job, None)
@@ -2085,7 +2206,8 @@ def run_extraction(p, log, set_progress, cancel):
                                        raw_covered_pct=f"{cov:.1f}",
                                        raw_covered_m2=f"{plot_area * cov / 100:.3f}",
                                        source_path=path, raw_style=eff,
-                                       pixel_source=('iiq' if iiq_dev is not None
+                                       pixel_source=('iiq_raw_sensor' if raw_cfa else
+                                                     'iiq' if iiq_dev is not None
                                                      else 'image'),
                                        # source-frame box the crop was cut from
                                        # (native/bbox/mask: crop pixel (0,0) =
@@ -2405,21 +2527,42 @@ def _affine_from_gcps(pts):
     return Affine(cx[0], cx[1], cx[2], cy[0], cy[1], cy[2]), res
 
 
-def write_plain_image(path, img, compress='lzw', tags=None):
+def _compress_key(label):
+    """'deflate', 'lzw' or 'none' from a compression label or key."""
+    s = str(label or '').strip().lower()
+    if s.startswith(('none', 'unc')):
+        return 'none'
+    return 'lzw' if s.startswith('lzw') else 'deflate'
+
+
+def _gdal_compress(key):
+    """GDAL GTiff options (all lossless; the predictor only reorders values)."""
+    key = _compress_key(key)
+    if key == 'none':
+        return {}
+    if key == 'lzw':
+        return dict(compress='lzw', predictor=2)
+    return dict(compress='deflate', predictor=2, zlevel=6)
+
+
+def write_plain_image(path, img, compress='deflate', tags=None):
     """Write an RGB image (PIL or HxWx3 numpy, uint8 or uint16) with GDAL, pixels
-    unchanged: TIFF (LZW + horizontal predictor, or uncompressed) or PNG."""
+    unchanged: TIFF (Deflate or LZW + horizontal predictor, or uncompressed) or PNG."""
     import warnings
     import numpy as np
     import rasterio
     arr = np.asarray(img)
+    if arr.ndim == 2:                          # one band (raw sensor values)
+        arr = arr[..., None]
     ext = os.path.splitext(path)[1].lower()
-    prof = dict(height=arr.shape[0], width=arr.shape[1], count=3, dtype=arr.dtype.name)
+    nb = arr.shape[2]
+    prof = dict(height=arr.shape[0], width=arr.shape[1], count=nb, dtype=arr.dtype.name)
     if ext == '.png':
         prof['driver'] = 'PNG'
     else:
-        prof.update(driver='GTiff', photometric='RGB', bigtiff='IF_SAFER')
-        if compress != 'none':
-            prof.update(compress='lzw', predictor=2)
+        prof.update(driver='GTiff', photometric='RGB' if nb == 3 else 'MINISBLACK',
+                    bigtiff='IF_SAFER')
+        prof.update(_gdal_compress(compress))
     with warnings.catch_warnings():
         warnings.simplefilter('ignore')        # NotGeoreferencedWarning
         with rasterio.open(path, 'w', **prof) as dst:
@@ -2428,7 +2571,7 @@ def write_plain_image(path, img, compress='lzw', tags=None):
                 dst.update_tags(**tags)
 
 
-def save_geotiff(path, pil_img, gcps, tags, log, embed_icc=True, compress='lzw'):
+def save_geotiff(path, pil_img, gcps, tags, log, embed_icc=True, compress='deflate'):
     """Write an RGB crop as a lossless GeoTIFF, georeferenced with a real
     affine geotransform + CRS fitted through the plot GCPs, so the file opens
     georeferenced in QGIS/GDAL directly (GCP-only files render at pixel
@@ -2443,11 +2586,12 @@ def save_geotiff(path, pil_img, gcps, tags, log, embed_icc=True, compress='lzw')
     from rasterio.control import GroundControlPoint
     from rasterio.crs import CRS
     arr = np.asarray(pil_img)                  # PIL image or HxWx3 uint8/uint16 array
-    prof = dict(driver='GTiff', height=arr.shape[0], width=arr.shape[1], count=3,
-                dtype=arr.dtype.name, photometric='RGB',
+    if arr.ndim == 2:                          # one band (raw sensor values)
+        arr = arr[..., None]
+    prof = dict(driver='GTiff', height=arr.shape[0], width=arr.shape[1], count=arr.shape[2],
+                dtype=arr.dtype.name, photometric='RGB' if arr.shape[2] == 3 else 'MINISBLACK',
                 tiled=True, blockxsize=512, blockysize=512, bigtiff='IF_SAFER')
-    if compress != 'none':
-        prof.update(compress='lzw', predictor=2)
+    prof.update(_gdal_compress(compress))
     icc = _source_icc_b64((tags or {}).get('SOURCE_IMAGE')) if embed_icc else None
     if icc:
         prof['SOURCE_ICC_PROFILE'] = icc     # GDAL writes the TIFF ICC tag
@@ -2976,6 +3120,8 @@ def build_plot_editor(parent, plots_path, on_saved, log=lambda *_: None,
     # Step default is read from config and remembered whenever it changes, so
     # the value you set becomes the default the next time the editor opens.
     step_var = tk.StringVar(value=str(_cfg_get('edit_step', '0.10')))
+    pct_w = tk.StringVar(value='0')
+    pct_l = tk.StringVar(value='0')
 
     def _step():
         try:
@@ -3332,22 +3478,50 @@ def build_plot_editor(parent, plots_path, on_saved, log=lambda *_: None,
         idxs = _targets()
         axis_name = 'width' if which == 'width' else 'length'
         for i in idxs:
-            r = rings[i]
-            cx, cy, uL, uW = _axes_metric(r)
-            ax = uW if which == 'width' else uL
-            for p in r:
-                x = (p[0] - cx) * mpx
-                y = (p[1] - cy) * mpy
-                comp = x * ax[0] + y * ax[1]                 # signed offset along axis (m)
-                s = 1.0 if comp >= 0 else -1.0
-                newmag = max(0.02, abs(comp) + d / 2.0)      # guard against collapse/inversion
-                move = s * newmag - comp                     # metres to shift along the axis
-                x += move * ax[0]; y += move * ax[1]
-                p[0] = cx + x / mpx
-                p[1] = cy + y / mpy
+            _resize_axis(rings[i], which, d)
         redraw()
         status.config(text=status_text(
             f"{axis_name.capitalize()} {'+' if d >= 0 else '−'}{abs(d):.2f} m -> "
+            f"{'selection' if sel else 'ALL'} ({len(idxs)})"))
+
+    def _resize_axis(r, which, d):
+        """Width (short axis) or length (long axis) of one plot + d metres, centred."""
+        cx, cy, uL, uW = _axes_metric(r)
+        ax = uW if which == 'width' else uL
+        for p in r:
+            x = (p[0] - cx) * mpx
+            y = (p[1] - cy) * mpy
+            comp = x * ax[0] + y * ax[1]                 # signed offset along axis (m)
+            s = 1.0 if comp >= 0 else -1.0
+            newmag = max(0.02, abs(comp) + d / 2.0)      # guard against collapse/inversion
+            move = s * newmag - comp                     # metres to shift along the axis
+            x += move * ax[0]; y += move * ax[1]
+            p[0] = cx + x / mpx
+            p[1] = cy + y / mpy
+
+    def do_pct():
+        """Resize every target plot by a percentage of ITS OWN width / length
+        (2 = 2 % wider / longer, -2 = 2 % narrower / shorter), centred, as in
+        PhenoFuse's 'Apply %'."""
+        try:
+            pw = float(pct_w.get() or 0)
+            pl = float(pct_l.get() or 0)
+        except ValueError:
+            status.config(text=status_text("Type a percentage in W % / L % (e.g. 2 or -2)"))
+            return
+        if not (pw or pl) or min(pw, pl) <= -90:
+            status.config(text=status_text("Type a percentage in W % / L % (e.g. 2 or -2)"))
+            return
+        idxs = _targets()
+        for i in idxs:
+            w, l = _wl(rings[i])
+            if pw:
+                _resize_axis(rings[i], 'width', w * pw / 100.0)
+            if pl:
+                _resize_axis(rings[i], 'length', l * pl / 100.0)
+        redraw()
+        status.config(text=status_text(
+            f"Width {pw:+.1f} %, length {pl:+.1f} % -> "
             f"{'selection' if sel else 'ALL'} ({len(idxs)})"))
 
     def do_shift(which, d):
@@ -3536,11 +3710,21 @@ def build_plot_editor(parent, plots_path, on_saved, log=lambda *_: None,
             return
         log(f"Edited plots saved: {outp}"
             + (f"  (EPSG:{dst})" if prj_txt else "  (input CRS)"))
+        try:
+            import crop_rows
+            old_rows = crop_rows.rows_path_for(plots_path)
+            if os.path.exists(old_rows):
+                rp = crop_rows.replace_count_rows(old_rows, outp, [list(r) for r in wr], ids)
+                if rp:
+                    log(f"Crop rows carried over: {rp} (fixed-spacing rows re-placed in the "
+                        "edited plots; detected / edited rows kept on the ground - review in 1c)")
+        except Exception as e:
+            log(f"[!] crop rows not carried over: {e}")
         on_saved(outp)
         if not quiet:
             messagebox.showinfo("Edit plots",
                                 f"Saved adjusted plots:\n{outp}\n\n"
-                                "Tabs 4 and 5 will now use this edited grid.")
+                                "Plot extraction (tab 3) will now use this edited grid.")
         if not embedded:
             win.destroy()
         return outp
@@ -3589,6 +3773,17 @@ def build_plot_editor(parent, plots_path, on_saved, log=lambda *_: None,
     tool("Shift ►", "Shift+→", lambda: do_shift('width', _step()), w=6)
     tool("Shift ▲", "Shift+↑", lambda: do_shift('length', _step()), w=6)
     tool("Shift ▼", "Shift+↓", lambda: do_shift('length', -_step()), w=6)
+    pcf = ttk.Frame(tb['f'])
+    pcf.pack(side='left', padx=(10, 3))
+    pcr = ttk.Frame(pcf)
+    pcr.pack()
+    ttk.Label(pcr, text="W %").pack(side='left')
+    ttk.Spinbox(pcr, textvariable=pct_w, from_=-50, to=200, increment=1, width=5).pack(side='left')
+    ttk.Label(pcr, text=" L %").pack(side='left')
+    ttk.Spinbox(pcr, textvariable=pct_l, from_=-50, to=200, increment=1, width=5).pack(side='left')
+    ttk.Button(pcr, text="Apply %", command=do_pct, width=8).pack(side='left', padx=(4, 0))
+    ttk.Label(pcf, text="% of each plot's own width / length (2 = +2 %, -2 = -2 %)",
+              foreground='#888', font=('Segoe UI', 7)).pack()
 
     # ---- bindings ----
     kb = cv if embedded else win
@@ -3639,6 +3834,7 @@ def build_plot_editor(parent, plots_path, on_saved, log=lambda *_: None,
         win.after(150, lambda: load_basemap(basemap))
     win.api = dict(select_all=select_all, clear=clear_sel, buffer=do_buffer, axis=do_axis,
                    shift=do_shift, reset=reset_all, save=save, load_basemap=load_basemap,
+                   pct=do_pct, pct_w=pct_w, pct_l=pct_l,
                    rings=rings, sel=sel, wl=_wl, basemap=bm)
     return win
 
@@ -3659,7 +3855,7 @@ def main():
             cfg = {}
 
     root = tk.Tk()
-    root.title("Plot Extractor 2026.10.30 — raw image per plot")
+    root.title("Plot Extractor 2026.11.10 — raw image per plot")
     root.geometry("1100x780")
     root.minsize(980, 640)
 
@@ -3693,25 +3889,48 @@ def main():
     except Exception:
         pass    # logos are cosmetic — never block the app
 
-    # Tabs, numbered in workflow order. The plot grid made in tab 1 or edited in
-    # tab 2 is the "current grid": tabs 4 and 5 use it by default, and either can
+    # Tabs, numbered in workflow order. The plot grid made in tab 1a or edited in
+    # tab 1b is the "current grid": tabs 3a and 3b use it by default, and either can
     # still be pointed at another plots file.
     nb = ttk.Notebook(root)
     nb.pack(fill='both', expand=True)
-    tab_grid = ttk.Frame(nb)
-    tab_edit = ttk.Frame(nb)
+    tab_grid_top = ttk.Frame(nb)
     tab_iiqc = ttk.Frame(nb)
-    tab_extract = ttk.Frame(nb)
-    tab_iiqx = ttk.Frame(nb)
+    tab_extract_top = ttk.Frame(nb)
     tab_tiles = ttk.Frame(nb)
-    tab_qa = ttk.Frame(nb)
     tab_ack = ttk.Frame(nb)
-    for _t, _name in ((tab_grid, "1  Generate plot grid"), (tab_edit, "2  Edit plot grid"),
-                      (tab_iiqc, "3  IIQ conversion"), (tab_extract, "4  Extract plots"),
-                      (tab_iiqx, "5  IIQ plot extraction"), (tab_tiles, "6  Training tiles"),
-                      (tab_qa, "7  QA"), (tab_ack, "8  Acknowledgements")):
+    for _t, _name in ((tab_grid_top, "1  Plot Grid Generation"),
+                      (tab_iiqc, "2  IIQ File Conversion"),
+                      (tab_extract_top, "3  Plot Extraction"),
+                      (tab_tiles, "4  Tiles Generation"),
+                      (tab_ack, "5  Acknowledgements")):
         nb.add(_t, text=f" {_name} ")
+    # tab 1: generate / edit the grid, review the crop rows inside the plots
+    nb_grid = ttk.Notebook(tab_grid_top)
+    nb_grid.pack(fill='both', expand=True, padx=2, pady=2)
+    tab_grid = ttk.Frame(nb_grid)
+    tab_edit = ttk.Frame(nb_grid)
+    tab_rows = ttk.Frame(nb_grid)
+    for _t, _name in ((tab_grid, "1a  Generate grid"), (tab_edit, "1b  Edit grid"),
+                      (tab_rows, "1c  Review crop rows")):
+        nb_grid.add(_t, text=f" {_name} ")
+    # tab 3: plot images from converted images (indirect) or straight from the IIQs
+    nb_ext = ttk.Notebook(tab_extract_top)
+    nb_ext.pack(fill='both', expand=True, padx=2, pady=2)
+    tab_extract = ttk.Frame(nb_ext)
+    tab_iiqx = ttk.Frame(nb_ext)
+    nb_ext.add(tab_extract, text=" 3a  From converted images (indirect) ")
+    nb_ext.add(tab_iiqx, text=" 3b  Direct from IIQ ")
+    tab_qa = None                     # 4c, made inside the tiles notebook below
 
+    ttk.Label(tab_extract, foreground='#355', justify='left', wraplength=1000, padding=(10, 6, 10, 0),
+              text=("Indirect: plot images cut from the photos the Metashape project was "
+                    "aligned on, or from images converted in tab 2 (TIFF / GeoTIFF, 8 or "
+                    "16 bit - 16-bit TIFFs keep their 16 bits in 'Masked' / 'Bounding box'), "
+                    "and / or from the orthomosaic. Converted frames of another size than "
+                    "the aligned photos (e.g. full size vs 0.3x) are scaled exactly. "
+                    "Use 3b to develop each plot straight from its IIQ without converting "
+                    "whole frames first.")).pack(anchor='w')
     frm = ttk.Frame(tab_extract, padding=10)
     frm.pack(fill='both', expand=True)
     frm.columnconfigure(1, weight=1)
@@ -3739,6 +3958,8 @@ def main():
         'gcp_epsg': tk.StringVar(value=str(cfg.get('gcp_epsg') or DEFAULT_EPSG)),
         'grid_epsg': tk.StringVar(value=str(cfg.get('grid_epsg') or DEFAULT_EPSG)),
         'format': tk.StringVar(value=cfg.get('format', 'TIFF (lossless)')),
+        'bits': tk.StringVar(value=str(cfg.get('bits', '8'))),
+        'compress': tk.StringVar(value=cfg.get('compress', 'Deflate')),
         'to_srgb': tk.BooleanVar(value=cfg.get('to_srgb', False)),
         'workers': tk.StringVar(value=str(cfg.get('workers', 0))),
         'auto_fit': tk.BooleanVar(value=cfg.get('auto_fit', False)),
@@ -3747,7 +3968,7 @@ def main():
         'smart_seam': tk.BooleanVar(value=cfg.get('smart_seam', True)),
         'seam_map': tk.BooleanVar(value=cfg.get('seam_map', False)),
         'mesh_step': tk.StringVar(value=str(cfg.get('mesh_step', MESH_STEP_PX))),
-        # the grid made in tab 1 / edited in tab 2, and tab 2's basemap
+        # the grid made in tab 1a / edited in tab 1b, and tab 1b's basemap
         'current_grid': tk.StringVar(value=cfg.get('current_grid', '')),
         'edit_basemap': tk.StringVar(value=cfg.get('edit_basemap', '')),
         'edit_rows': tk.StringVar(value=str(cfg.get('edit_rows', 0))),
@@ -3814,7 +4035,7 @@ def main():
                                "no Metashape / license needed")
     add_path_row("Plot grid (.shp / .geojson) *", vars_['plots'], 'file',
                  [("Plot boundaries", "*.shp *.geojson *.json")],
-                 hint="Default: the grid made in tab 1 or edited in tab 2. "
+                 hint="Default: the grid made in tab 1a or edited in tab 1b. "
                       "Browse to extract with another plots file.")
 
     idrow = ttk.Frame(frm)
@@ -3863,6 +4084,12 @@ def main():
                              values=["GeoTIFF (geotagged, lossless)", "PNG (lossless)",
                                      "TIFF (lossless)", "JPEG (small files)"])
     fmt_combo.pack(side='left', padx=(0, 14))
+    ttk.Label(opts, text="Bits:").pack(side='left', padx=(0, 4))
+    ttk.Combobox(opts, textvariable=vars_['bits'], width=3, state='readonly',
+                 values=["8", "16"]).pack(side='left', padx=(0, 10))
+    ttk.Label(opts, text="TIFF compression:").pack(side='left', padx=(0, 4))
+    ttk.Combobox(opts, textvariable=vars_['compress'], width=8, state='readonly',
+                 values=["Deflate", "LZW", "None"]).pack(side='left', padx=(0, 14))
     quality_lbl = ttk.Label(opts, text="JPEG quality:")
     quality_ent = ttk.Entry(opts, textvariable=vars_['quality'], width=4)
 
@@ -4054,7 +4281,7 @@ def main():
             return
         vals = rcp.gui_section(f, "plot_extraction")
         if not vals:
-            log(f"[!] {os.path.basename(f)} has no plot_extraction settings from tab 4")
+            log(f"[!] {os.path.basename(f)} has no plot_extraction settings from tab 3a")
             return
         n = rcp.apply_gui(vars_, vals)
         log(f"Recipe loaded: {n} setting(s) from {f}")
@@ -4113,6 +4340,8 @@ def main():
                               n_per_plot=int(vars_['n_per_plot'].get() or 1),
                               limit=int(vars_['limit'].get() or 0),
                               quality=int(vars_['quality'].get() or 92),
+                              bits=vars_['bits'].get(),
+                              compress=_compress_key(vars_['compress'].get()),
                               do_raw=vars_['do_raw'].get(),
                               raw_mode={"Native (no resample, no black)": "native",
                                         "Auto-straighten tilted": "auto",
@@ -4318,10 +4547,10 @@ def main():
                                 "Grid corrected",
                                 "A corrected grid was written to:" + NL + NL
                                 + path + NL + NL
-                                + "Use it as the current grid (tabs 4 and 5)?"):
+                                + "Use it as the current grid (tabs 3a and 3b)?"):
                             set_grid(path, "corrected grid")
                             ed_log("With the grid corrected, leave 'Auto-fit to rows' OFF "
-                                   "in tab 4 — the polygon is now the plot.")
+                                   "in tab 3a — the polygon is now the plot.")
                     elif code == 3:
                         messagebox.showinfo(
                             "Grid not changed",
@@ -4353,8 +4582,8 @@ def main():
         root.destroy()
 
     def follow_ortho_crs(crs, lonlat):
-        """An orthomosaic was loaded in tab 1 or 2: every output CRS field (grids of
-        tabs 1-2, images of tabs 3-5) follows it; the user can still type another."""
+        """An orthomosaic was loaded in tab 1a or 1b: every output CRS field (grids of
+        tab 1, images of tabs 2-3) follows it; the user can still type another."""
         e = epsg_from_ortho(crs, lonlat)
         if not e:
             return
@@ -4379,8 +4608,9 @@ def main():
     # Builds the plot shapefile by clicking the 4 trial corners on an
     # orthomosaic; "Save & use" feeds it straight back into the form above.
     def _use_grid(path):
-        set_grid(path, "new grid from tab 1")
-        nb.select(tab_edit)
+        set_grid(path, "new grid from tab 1a")
+        nb.select(tab_grid_top)
+        nb_grid.select(tab_edit)
 
     try:
         from grid_designer import build_grid_designer
@@ -4397,7 +4627,7 @@ def main():
         ttk.Label(tab_grid, text=msg, justify='left', padding=20,
                   foreground='#a00').pack(anchor='nw')
 
-    # ---- tab 2: "Edit plot grid" -------------------------------------------
+    # ---- tab 1b: "Edit grid" -------------------------------------------
     # The plot editor (move / reshape / width / length / shift / grow) on the RGB
     # orthomosaic, plus "Correct grid to rows". Saves <grid>_edited.shp (or
     # _refit.shp) beside the input, which is never changed, and makes it the current grid.
@@ -4455,7 +4685,7 @@ def main():
         pth = ed_grid.get().strip()
         if not (pth and os.path.exists(pth)):
             ttk.Label(ed_host, padding=20, foreground='#555', justify='left', text=(
-                "Choose a plot grid (made in tab 1, or any .shp / .geojson) and press "
+                "Choose a plot grid (made in tab 1a, or any .shp / .geojson) and press "
                 "Load grid." + NL + "Add the RGB orthomosaic to edit the plots on the "
                 "imagery.")).pack(anchor='nw')
             return
@@ -4473,21 +4703,21 @@ def main():
     fixgrid_btn.configure(command=on_fix_grid)
 
     def set_grid(path, why="grid", reload_editor=True):
-        """Make `path` the current grid: the default of tabs 2, 4 and 5."""
+        """Make `path` the current grid: the default of tabs 1b, 1c, 3a and 3b."""
         vars_['current_grid'].set(path)
         vars_['plots'].set(path)
         ed_grid.set(path)
         if iiqx.get('V') is not None:
             iiqx['V']['plots'].set(path)
         log(f"Current plot grid ({why}): {path}")
-        ed_log(f"Current plot grid ({why}): {path}  -> used by tabs 4 and 5")
+        ed_log(f"Current plot grid ({why}): {path}  -> used by tabs 3a and 3b")
         save_config()
         if reload_editor:
             load_editor()
     iiqx = {'V': None}
     root.after(300, load_editor)
 
-    # ---- tab 8: "Acknowledgements" -----------------------------------------
+    # ---- tab 5: "Acknowledgements" -----------------------------------------
     try:
         import iiq as _iiq_ack
         _iiq_ack.build_ack_tab(tab_ack).pack(fill='both', expand=True)
@@ -4496,7 +4726,7 @@ def main():
                   text=("The acknowledgements could not be shown:" + NL + str(e))
                   ).pack(anchor='nw')
 
-    # ---- "Training tiles" tab ---------------------------------------------
+    # ---- tab 4 "Tiles Generation" (4a, 4b; 4c QA added below) ---------------------------------------------
     # Cuts the per-plot crops into fixed-size tiles for labelling, and puts
     # labelled tiles back together into one image per plot so a whole plot can be
     # reviewed at once. Tile names follow the group's existing convention
@@ -4514,6 +4744,8 @@ def main():
             plotw=cfg.get('plot_width_mm', ''),
         ))
         tt.pack(fill='both', expand=True)
+        tab_qa = ttk.Frame(tt)
+        tt.add(tab_qa, text="4c  QA")
     except Exception as e:
         ttk.Label(tab_tiles, justify='left', padding=20, foreground='#a00',
                   text=("The tiling tab could not be loaded:" + NL + NL + str(e)
@@ -4523,6 +4755,9 @@ def main():
     # ---- "QA" tab ------------------------------------------------------------
     # Per plot: the row detection with the middle band and the tiles, the tiles, the
     # saved rows; and the checks (raw crops vs source frames, tiles vs crops, rows).
+    if tab_qa is None:
+        tab_qa = ttk.Frame(tab_tiles)
+        tab_qa.pack(fill='both', expand=True)
     try:
         from qa import build_qa_tab
         _out = vars_['outdir'].get().strip()
@@ -4542,7 +4777,7 @@ def main():
             _f = getattr(_iiq_mod, _name)(_tab)
             _f.pack(fill='both', expand=True)
             if _tab is tab_iiqx:
-                # same default grid as tab 4; the user can still pick another file
+                # same default grid as tab 3a; the user can still pick another file
                 iiqx['V'] = _f.V
                 if not _f.V['plots'].get().strip() and vars_['current_grid'].get():
                     _f.V['plots'].set(vars_['current_grid'].get())
@@ -4551,14 +4786,30 @@ def main():
                       text=("The IIQ tab could not be loaded:" + NL + NL + str(e))
                       ).pack(anchor='nw')
 
+    # ---- tab 1c: "Review crop rows" ------------------------------------------
+    try:
+        from row_review import build_row_review
+        rr = build_row_review(tab_rows, get_grid=lambda: vars_['current_grid'].get().strip(),
+                              get_ortho=lambda: (vars_['edit_basemap'].get().strip()
+                                                 or vars_['ortho_tif'].get().strip()),
+                              log=log)
+        rr.pack(fill='both', expand=True)
+    except Exception as e:
+        rr = None
+        ttk.Label(tab_rows, justify='left', padding=20, foreground='#a00',
+                  text=("The crop-row review could not be loaded:" + NL + NL + str(e))
+                  ).pack(anchor='nw')
+
     root.protocol("WM_DELETE_WINDOW", on_close)
     # handles for the GUI self-test; not used by the app itself
     root._pe = dict(nb=nb, vars=vars_, set_grid=set_grid, use_grid=_use_grid, editor=editor,
                     grid_designer=locals().get('gd'),
                     ed_grid=ed_grid, load_editor=load_editor, iiqx=iiqx, run_btn=run_btn, logbox=logbox,
-                    state=state, tabs=dict(grid=tab_grid, edit=tab_edit, iiqc=tab_iiqc,
-                                           extract=tab_extract, iiqx=tab_iiqx,
-                                           tiles=tab_tiles, qa=tab_qa, ack=tab_ack))
+                    row_review=rr, nb_grid=nb_grid, nb_ext=nb_ext,
+                    state=state, tabs=dict(grid=tab_grid, edit=tab_edit, rows=tab_rows,
+                                           iiqc=tab_iiqc, extract=tab_extract, iiqx=tab_iiqx,
+                                           tiles=tab_tiles, qa=tab_qa, ack=tab_ack,
+                                           grid_top=tab_grid_top, extract_top=tab_extract_top))
     if vars_['plots'].get():
         root.after(400, refresh_id_fields)
     poll()
@@ -4569,7 +4820,8 @@ def _selftest():
     """Headless import + license check for the frozen build (no GUI)."""
     ok = True
     for m in ("numpy", "PIL", "PIL.ImageCms", "PIL.ImageTk", "rasterio",
-              "rasterio.features", "rasterio.warp", "shapefile", "shapely.geometry"):
+              "rasterio.features", "rasterio.warp", "shapefile", "shapely.geometry",
+              "rawpy", "crop_rows", "row_review", "row_detect", "tiler", "qa", "iiq"):
         try:
             __import__(m); print(f"  [ok] {m}")
         except Exception as e:

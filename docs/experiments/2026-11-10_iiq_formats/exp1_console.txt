@@ -1,0 +1,52 @@
+RUN N16_geotiff
+Found 1 GPUs in 0.109 sec (CUDA: 0.018 sec, OpenCL: 0.022 sec, Vulkan: 0.069 sec)
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0.001 sec
+C:\Users\M.Ibrah\AppData\Local\Programs\Python\Python311\Lib\site-packages\rasterio\__init__.py:378: NotGeoreferencedWarning: Dataset has no geotransform, gcps, or rpcs. The identity matrix will be returned.
+  dataset = writer(
+  done N16_geotiff 29.1 s
+RUN N16_tiff
+Found 1 GPUs in 0.003 sec (CUDA: 0 sec, OpenCL: 0 sec, Vulkan: 0.003 sec)
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0.001 sec
+  done N16_tiff 18.2 s
+RUN N16_tiff_none
+Found 1 GPUs in 0.004 sec (CUDA: 0 sec, OpenCL: 0 sec, Vulkan: 0.004 sec)
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0.001 sec
+  done N16_tiff_none 16.5 s
+RUN N16_png
+Found 1 GPUs in 0.003 sec (CUDA: 0 sec, OpenCL: 0 sec, Vulkan: 0.003 sec)
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0 sec
+  done N16_png 121.7 s
+RUN N8_geotiff
+Found 1 GPUs in 0.003 sec (CUDA: 0 sec, OpenCL: 0 sec, Vulkan: 0.003 sec)
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0.014 sec
+  done N8_geotiff 18.5 s
+RUN N8_tiff
+Found 1 GPUs in 0.003 sec (CUDA: 0 sec, OpenCL: 0 sec, Vulkan: 0.003 sec)
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0.001 sec
+  done N8_tiff 16.4 s
+RUN N8_png
+Found 1 GPUs in 0.004 sec (CUDA: 0 sec, OpenCL: 0 sec, Vulkan: 0.004 sec)
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0.001 sec
+  done N8_png 21.3 s
+RUN N8_jpeg
+Found 1 GPUs in 0.004 sec (CUDA: 0 sec, OpenCL: 0 sec, Vulkan: 0.004 sec)
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0.001 sec
+  done N8_jpeg 15.6 s
+RUN HR16_geotiff
+Found 1 GPUs in 0.004 sec (CUDA: 0 sec, OpenCL: 0 sec, Vulkan: 0.004 sec)
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0.001 sec
+  done HR16_geotiff 23.6 s
+RUN HR8_geotiff
+Found 1 GPUs in 0.003 sec (CUDA: 0 sec, OpenCL: 0 sec, Vulkan: 0.003 sec)
+LoadProject: path = G:\APPN 2025\2025_Calibrationtrial_I_SIF_DPIRD\2025-York_F\PhaseOne\2025-06-25\run00\T1_Proc\MetaShapeProcessing.psx, read_only = on
+loaded project in 0.001 sec
+  done HR8_geotiff 21.0 s

@@ -3,20 +3,22 @@
 **Plot-wise images from Phase One drone flights.** PlotExtractor takes a drone flight
 processed in Agisoft Metashape and gives you one original-quality image per field plot,
 ready for phenotyping, labelling and training models. It covers the whole chain:
-making and editing the plot grid, cutting each plot from the photos (or developing it
-straight from the Phase One IIQ raw files), cutting training tiles from the middle crop
+making and editing the plot grid with the crop rows inside every plot, cutting each plot
+from converted images or straight from the Phase One IIQ raw files (down to the raw
+sensor values, with nothing lost), cutting tiles of a fixed ground size or along the crop
 rows, and checking every output against its source.
 
 Developed by DPIRD (Department of Primary Industries and Regional Development, Western
 Australia) for the WA node of the Australian Plant Phenomics Network (APPN).
 
-![PlotExtractor, tab 5: plot images developed straight from the IIQ raw files](docs/images/app_tab5_iiqx.png)
+![PlotExtractor, tab 1c: crop rows detected in the orthomosaic, plot by plot](docs/images/app_rows_review.png)
 
 **Download:** [latest release](https://github.com/appndpird/plot-extractor/releases/latest)
 (Windows 64-bit, no Python needed) · **Guide:**
 [User Guide (PDF)](docs/PlotExtractor_User_Guide.pdf) ·
 [Technical Report (PDF)](docs/PlotExtractor_Technical_Report.pdf) ·
 [Narrated demo video (MP4)](https://github.com/appndpird/plot-extractor/releases/download/v2026.10.30/PlotExtractor_Demo.mp4)
+(recorded with an earlier tab layout)
 
 ## Why
 
@@ -29,28 +31,27 @@ single photo holds can be stitched from several photos instead.
 
 ## Features
 
-- **Plot grid on the orthomosaic** - draw a grid from the 4 trial corners and the
-  layout, then move, reshape, grow, widen, lengthen or shift plots, or re-centre them on
-  the drilled rows. Works on any RGB orthomosaic, no Metashape licence needed.
-- **One image per plot from the photos** - the frame holding the whole plot (or the
-  largest part), cut unchanged; masked, bounding-box, native or rectified/stitched
-  styles; GeoTIFF with an affine georeference, PNG, TIFF or JPEG.
-- **IIQ-Direct** - each plot developed straight from the Phase One IIQ raw file with the
-  Phase One ImageSDK (approach of APPN, The University of Queensland, extended).
-  Lower noise and more fine detail than the JPEGs.
+- **Plot grid with crop rows** - draw a grid from the 4 trial corners and the layout,
+  optionally with the crop rows of every plot (evenly spaced from the row count); edit
+  plots by metres or by % of their own width / length; review and edit the crop rows plot
+  by plot, from the row count or detected in the orthomosaic (PhenoFuse row method).
+  Works on any RGB orthomosaic, no Metashape licence needed.
+- **One image per plot, two ways** - *indirect* from the photos the project was aligned
+  on or from frames converted in tab 2 (8- or 16-bit TIFF, any size), or *direct* from
+  the IIQ: each plot's box developed with the Phase One ImageSDK (approach of APPN, The
+  University of Queensland, extended), or copied as **raw sensor values** (Bayer mosaic,
+  16 bit, not developed: nothing lost or changed; no SDK needed).
+- **Lossless output** - GeoTIFF (affine georeference, pixels untouched), TIFF or PNG at
+  8 or 16 bit, **Deflate** (smallest), LZW or uncompressed; JPEG when size matters more.
 - **IIQ conversion** - IIQ to TIFF (8/16 bit), georeferenced GeoTIFF or JPEG.
-- **Training tiles** - tiles of a fixed ground size (1 m x 1 m by default), the same
-  pixel size on every plot, from the middle N crop rows (row detection with tilt) or the
-  whole plot, kept away from the bare plot ends; georeferenced GeoTIFFs linked to their
-  source photo / IIQ.
-- **Rows and row tiles** - whole crop rows (all, middle N or chosen rows) and same-size
-  tiles (e.g. 1 m along the row) along each row, in one folder per plot.
+- **Tiles** - of a fixed ground size (1 m x 1 m by default, the same pixel size on every
+  plot) or of **native pixels** (exact copies, never resampled), from the middle N crop
+  rows or the whole plot, kept away from the bare plot ends; whole rows and same-size
+  tiles along each row; georeferenced, linked to their source photo / IIQ.
 - **Recipe file** - every run records its settings in `PlotExtractor_recipe.json`;
   *Load recipe...* repeats them.
-- **8 or 16 bit, LZW or uncompressed** - tab 5 develops plots at 8 or 16 bit; every
-  TIFF / GeoTIFF is written with GDAL, LZW (lossless) or uncompressed, same pixels.
-- **QA** - every crop checked against its source (pixel-identical for JPEGs, a fresh
-  development for IIQs), tiles against crops, rows; pictures per plot.
+- **QA** - every crop checked against its source (pixel-identical for JPEG / TIFF, a fresh
+  development or a fresh read for IIQs), tiles against crops, rows; pictures per plot.
 - **Coordinate system** - outputs in EPSG:7850 (GDA2020 / MGA zone 50) by default,
   following the orthomosaic's CRS when one is loaded; any EPSG code can be chosen.
 - **Safe with source data** - the Metashape project is opened read-only, the IIQ folder
@@ -60,86 +61,89 @@ single photo holds can be stitched from several photos instead.
 
 | # | Tab | What it does |
 |---|---|---|
-| 1 | **Generate plot grid** | Builds the plot shapefile on an RGB orthomosaic: click the 4 trial corners, set ranges / rows / plot size, *Save & use*. No Metashape needed. |
-| 2 | **Edit plot grid** | Edits a grid on the RGB orthomosaic: move, reshape, grow/shrink, width, length, shift (one plot, a selection or all), and *Correct grid to rows*. Saves `<grid>_edited.shp` (or `_refit.shp`) beside the input, which is never changed. |
-| 3 | **IIQ conversion** | Phase One IIQ raw files → TIFF (8/16 bit), GeoTIFF (georeferenced from the aligned cameras) or JPEG, with the Phase One ImageSDK. |
-| 4 | **Extract plots** | One image per plot cut from the Phase One JPEG/TIFF renditions (bit-identical pixels), optional rectified/stitched and orthomosaic crops. |
-| 5 | **IIQ plot extraction** | The same extraction, but each plot's box is developed directly from its IIQ raw file (approach of the APPN-UQ PhaseOne_Pipeline, with our changes - see tab 8). 8 or 16 bit; LZW or uncompressed. |
-| 6 | **Training tiles** | **6a** tiles of a fixed ground size (1 m x 1 m by default, the same pixel size on every plot) from the middle N crop rows or the whole plot; **6b** whole rows (all / middle N / chosen rows) and same-size tiles along each row. Georeferenced, linked to the source photo / IIQ; settings saved in a recipe file. |
-| 7 | **QA** | Checks crops against their source (JPEG or a fresh IIQ development), tiles against crops, rows; per-plot pictures. |
-| 8 | **Acknowledgements** | Credits APPN (The University of Queensland) and Phase One for the IIQ plot extraction and lists what we changed in their method. |
+| 1 | **Plot Grid Generation** | **1a Generate grid**: the plot shapefile from the 4 trial corners and the layout, optionally with *Crop rows per plot* (`<grid>_rows.shp`). **1b Edit grid**: move, reshape, grow/shrink, width / length by metres or *W % / L %*, shift; *Correct grid to rows*; saves `<grid>_edited.shp` (rows follow). **1c Review crop rows**: make the row lines (fixed spacing from the count, or detected in the orthomosaic), review them plot by plot, move / add / delete / even-space rows, save. |
+| 2 | **IIQ File Conversion** | Phase One IIQ raw files → TIFF (8/16 bit), GeoTIFF (georeferenced from the aligned cameras) or JPEG, with the Phase One ImageSDK. |
+| 3 | **Plot Extraction** | **3a From converted images (indirect)**: one image per plot cut from the JPEGs the project was aligned on or from frames converted in tab 2 (16-bit kept, other sizes scaled exactly), optional rectified / stitched and orthomosaic crops. **3b Direct from IIQ**: each plot's box developed from its IIQ (8/16 bit), or its raw sensor values. |
+| 4 | **Tiles Generation** | **4a Fixed ground size tiles** (metres, or native pixels); **4b Row-based tiles**: whole rows and same-size tiles along each row; **4c QA**: crops vs source, tiles vs crops, rows. |
+| 5 | **Acknowledgements** | Credits APPN (The University of Queensland) and Phase One for the IIQ plot extraction and lists what we changed in their method. |
 
 | | |
 |---|---|
-| ![Tab 1](docs/images/app_tab1_grid.png) **1 · Generate plot grid** | ![Tab 2](docs/images/app_tab2_edit.png) **2 · Edit plot grid** |
-| ![Tab 3](docs/images/app_tab3_iiqconv.png) **3 · IIQ conversion** | ![Tab 4](docs/images/app_tab4_extract.png) **4 · Extract plots** |
-| ![Tab 6](docs/images/app_tab6_tiles.png) **6 · Training tiles** | ![Tab 8](docs/images/app_tab8_ack.png) **8 · Acknowledgements** |
+| ![Tab 1a](docs/images/app_tab1a.png) **1a · Generate grid** (5 crop rows per plot) | ![Tab 1b](docs/images/app_edit_pct.png) **1b · Edit grid** (W % / L %) |
+| ![Tab 3a](docs/images/app_tab3a.png) **3a · From converted images** | ![Tab 3b](docs/images/app_tab3b.png) **3b · Direct from IIQ** |
+| ![Tab 4a](docs/images/app_tab4a.png) **4a · Fixed ground size tiles** | ![Tab 4b](docs/images/app_tab4b.png) **4b · Row-based tiles** |
 
-**The current grid.** The grid saved in tab 1 or tab 2 becomes the *current grid*: tab 2
-loads it for editing, and tabs 4 and 5 use it by default. Each of tabs 4 and 5 can still
-be pointed at any other plots file with *Browse*. Plot grids are made and edited on RGB
-orthomosaics.
+**The current grid.** The grid saved in tab 1a or 1b becomes the *current grid*: 1b
+loads it for editing, 1c reviews its rows, and tabs 3a and 3b use it by default (each can
+be pointed at any other plots file with *Browse*).
 
 **Coordinate system.** Every output is written in **EPSG:7850 (GDA2020 / MGA zone 50)** by
-default: the grids saved in tabs 1 and 2 (reprojected from the orthomosaic's or the input
-file's CRS) and the georeferenced images of tabs 3, 4 and 5. Each tab has an *Output CRS
-(EPSG)* / *Save in CRS* field to choose another code (e.g. 7851 for MGA zone 51, 4326
-for WGS 84). Input grids and orthomosaics may be in any CRS.
-When an orthomosaic is loaded in tab 1 or 2, all these fields **follow the orthomosaic's
-CRS**: a projected orthomosaic gives its own EPSG code; a lon/lat one (e.g. WGS 84) gives
-its local GDA2020 / MGA zone (7850 at York). The log says so, and any field can still be
-changed afterwards.
+default: the grids of tab 1 (reprojected from the orthomosaic's or the input file's CRS)
+and the georeferenced images of tabs 2 and 3. Each tab has an *Output CRS (EPSG)* /
+*Save in CRS* field for another code. When an orthomosaic is loaded in tab 1a or 1b, all
+these fields **follow the orthomosaic's CRS** (a lon/lat orthomosaic gives its local
+GDA2020 / MGA zone, 7850 at York).
 
-## Two ways to get the plot images: JPEG (tab 4) or IIQ (tab 5)
+## Keeping the original data (experiment, 10-11 Nov 2026)
 
-Both find the plot the same way; they differ in where the raw sensor data is turned into
-a colour picture.
+York 2025 calibration trial, 36 plots, tab 3b in every output format (scripts and
+results: [`docs/experiments/2026-11-10_iiq_formats`](docs/experiments/2026-11-10_iiq_formats);
+User Guide chapter 10, Technical Report E8):
 
-![Tab 4: cut from the finished JPEG](docs/images/fig13_diagram_jpeg.png)
-![Tab 5: develop the plot from the IIQ raw file](docs/images/fig14_diagram_iiq_direct.png)
-
-| York 2025, 29 plots on the same photo | Tab 4 (T1_Proc JPEG) | Tab 5 (IIQ, APPN HR settings) |
+| Step | Changes the values? | York 2025 |
 |---|---|---|
-| Pixels | identical to the JPEG | developed from the raw file, lossless |
-| Brightness noise (median) | 3.55 | **3.13** |
-| Detail / noise | 5.4 | **7.4** |
-| Alignment between the two | - | 0.01-0.02 px |
-| Colour | Phase One JPEG (Adobe RGB) | SDK (sRGB), slightly less green |
-| Needs | Metashape licence | + IIQ files + Phase One ImageSDK |
+| Raw sensor values (3b) | no - the recorded data | 36/36 identical on re-reading from the IIQ |
+| GeoTIFF vs TIFF vs PNG, Deflate / LZW / none | no | 36/36 pixel-identical, 8 and 16 bit |
+| 16 → 8 bit | yes, 65,536 → 256 levels | 8 bit = 16 bit / 257 within 1 level |
+| JPEG q95 | yes, lossy | PSNR 32.6 dB, 99.9 % of pixels changed |
+| GeoTIFF georeference | no - metadata only | affine through 23 GCPs, residual 4.7 mm mean, 20 mm max |
+| Tiles in px | no | 664/664 exact copies |
+| Tiles in m | yes on most plots (one pixel size) | 362 of 372 resampled (× 0.89-1.05) |
 
-![Same ground, JPEG crop (left) and IIQ crop (right)](docs/images/fig12_iiq_vs_jpeg.png)
-
-Use one pixel source per trial and season: vegetation indices from the two are not
-interchangeable (same plot ranking, different absolute values).
+- **How the GeoTIFF is made:** the crop's pixels are written unchanged; ground control
+  points (crop pixel → ground, through Metashape's camera model and the DEM) are fitted
+  by an affine transform that becomes the geotransform. The affine places the image on a
+  map to within millimetres - a position accuracy, not data loss.
+- **Deflate is the new default:** 16-bit plot 6006 = 98 MB (LZW 135 MB, larger than
+  uncompressed 126 MB).
+- **3a = 3b:** crops from 16-bit TIFFs converted in tab 2 are identical to the 3b crops.
+- **APPN PhaseOne_Pipeline** (unmodified, same flight): 30/36 plots (drops plots not whole
+  in one photo); 8-bit uncompressed TIFF without georeference; with the same box and
+  settings its pixels equal PlotExtractor's (19/22 identical, 3 within the SDK's noise
+  reduction jitter). Its current `config_hr.txt` brightens by 0.8 EV and clips 1.7 % of
+  pixels (Neutral 0.2 %).
+- **No data loss:** 3b with *Raw sensor values* (archive), or Neutral 16-bit GeoTIFF with
+  Deflate; tiles in px.
 
 ## Download and install
 
 1. Download `PlotExtractor-<date>-win64.zip` from the
    [Releases](https://github.com/appndpird/plot-extractor/releases) page, unzip it
    anywhere and run `PlotExtractor\PlotExtractor.exe` (Windows 10/11 x64).
-2. Tabs 3 (GeoTIFF), 4 and 5 need an Agisoft Metashape licence reachable from the PC
-   (node-locked or floating). Tabs 1, 2, 6 and 7 need no licence.
-3. Tabs 3 and 5 need the **Phase One ImageSDK**, which is licensed by Phase One A/S and
-   is **not** included in the download. With an SDK from Phase One, set *Phase One SDK
-   folder* on tab 3/5 to the SDK folder (with `lib\ImageSdkCpp.dll` and
-   `SensorProfiles\`). The status line turns green when it is found.
+2. Tabs 2 (GeoTIFF), 3a and 3b need an Agisoft Metashape licence reachable from the PC
+   (node-locked or floating). Tabs 1, 4 and 5 need no licence.
+3. Tabs 2 and 3b (developed pixels) need the **Phase One ImageSDK**, which is licensed by
+   Phase One A/S and is **not** included in the download. With an SDK from Phase One, set
+   *Phase One SDK folder* on tab 2/3b to the SDK folder (with `lib\ImageSdkCpp.dll` and
+   `SensorProfiles\`). 3b with *Raw sensor values* does not need it.
 
 `PlotExtractor.exe --selftest` checks the libraries and the Metashape licence.
 
 ## Quick start
 
-1. **Tab 1** - load the RGB orthomosaic, click the 4 trial corners, set ranges, rows and
-   plot size, *Preview*, *Save & use*. (Or load your own grid in **tab 2**.)
-2. **Tab 2** - fine-tune plots over the orthomosaic, *Save & use*.
-3. **Tab 4** - choose the Metashape project (.psx) and the flight's `T1_Proc\JPEG`
+1. **Tab 1a** - load the RGB orthomosaic, click the 4 trial corners, set ranges, plots per
+   range, plot size and *Crop rows per plot*, *Preview*, *Save & use*. (Or load your own
+   grid in **1b**, fine-tune, *Save & use*.)
+2. **Tab 1c** (optional) - *Make rows* (fixed spacing or detected) and page through the
+   plots to check the grid sits on the rows.
+3. **Tab 3a** - choose the Metashape project (.psx) and the flight's `T1_Proc\JPEG`
    folder; the grid is already filled in. Margin 0.10 m, *Masked to plot*, GeoTIFF.
-   Test with *Limit* 3, then run all. For the highest quality use **tab 5** with the
-   flight's `T0_Raw` IIQ folder instead.
-4. **Tab 6a** - tiles from `<output>\RawCrops`: tile size 1.0 m, middle 3 rows, sown
-   rows per plot, 0.5 m from the plot ends; format tif, bits *same as plot image*, LZW,
-   *Georeference tiles* and *Link tiles to the source photo / IIQ* on. **Tab 6b** - rows
-   `all`, whole rows + 1 m row tiles.
-5. **Tab 7** - run the checks on the output and the tiles.
+   Test with *Limit* 3, then run all. For the highest quality, or the raw data with
+   nothing lost, use **tab 3b** with the flight's `T0_Raw` IIQ folder.
+4. **Tab 4a** - tiles from `<output>\RawCrops`: 1.0 m (or px for exact copies), middle 3
+   rows, sown rows per plot, 0.5 m from the plot ends; tif, bits *same as plot image*,
+   Deflate. **Tab 4b** - rows `all`, whole rows + 1 m row tiles.
+5. **Tab 4c** - run the checks on the output and the tiles.
 
 Each run writes `RawCrops\plot_<Plot_ID>.tif`, `manifest.csv` (source photo, coverage,
 pixel box per plot) and `candidates.csv` (every photo that sees each plot).
@@ -147,16 +151,15 @@ pixel box per plot) and `candidates.csv` (every photo that sees each plot).
 ## Documentation
 
 - [User Guide (PDF)](docs/PlotExtractor_User_Guide.pdf) - every tab, step by step, with
-  screenshots, recommended settings and troubleshooting. Section 8.2 shows how tab 5
-  develops a plot from the IIQ; section 9.5 explains how the rows are found (excess green,
-  Otsu threshold and its green fallback, row profile, Fourier row spacing, tilt, comb fit),
-  one figure per step on a real plot.
-- [Narrated demo video (MP4)](https://github.com/appndpird/plot-extractor/releases/download/v2026.10.30/PlotExtractor_Demo.mp4) - the extraction and
-  tiling tabs, IIQ plot extraction, and an animated walk-through of the row detection.
+  screenshots, recommended settings and troubleshooting. Section 4.3: crop-row review;
+  6.3.3: how tab 3b develops a plot from the IIQ; 7.5: how the rows are found; chapter 10:
+  formats, georeference and data loss.
 - [Technical Report (PDF)](docs/PlotExtractor_Technical_Report.pdf) - methods and the
   experiments on the York 2025 calibration trial (fidelity, rows, tiles, frame coverage,
-  JPEG vs IIQ-Direct, with block diagrams of both methods).
-- The *Reference* part below is the detailed description of every option.
+  JPEG vs IIQ-Direct, output formats / raw sensor values / APPN pipeline).
+- The *Reference* part below is the detailed description of every option. **It keeps the
+  tab numbers of the version it was written for:** old 1 → 1a, 2 → 1b, 3 → 2,
+  4 → 3a, 5 → 3b, 6a → 4a, 6b → 4b, 7 → 4c, 8 → 5.
 
 ## Run from source
 
@@ -173,24 +176,25 @@ tabs, build `iiq_tools\p1tool.exe` with `iiq_tools\build_p1tool.bat "<ImageSDK f
 
 | Path | Contents |
 |---|---|
-| `plot_extractor.py` | Main window (tabs 1-8), plot extraction engine, plot editor |
-| `grid_designer.py` | Tab 1, plot grid from 4 corners |
-| `grid_refit.py` | *Correct grid to rows* (tab 2) |
-| `iiq.py` | Tabs 3, 5 and 8: IIQ conversion, IIQ plot extraction, acknowledgements |
+| `plot_extractor.py` | Main window (tabs 1-5 and their sub-tabs), plot extraction engine, plot editor (1b) |
+| `grid_designer.py` | Tab 1a, plot grid from 4 corners, crop rows from the count |
+| `crop_rows.py`, `row_review.py` | Crop-row lines (count / detected), tab 1c review and editing |
+| `grid_refit.py` | *Correct grid to rows* (tab 1b) |
+| `iiq.py` | Tabs 2, 3b and 5: IIQ conversion, direct IIQ extraction (developed or raw sensor values), acknowledgements |
 | `iiq_tools/` | `src/p1tool.cpp` (Phase One ImageSDK helper), `build_p1tool.bat`, development presets |
-| `tiler.py`, `row_detect.py` | Tab 6 (6a plot tiles, 6b rows and row tiles) and row detection |
+| `tiler.py`, `row_detect.py` | Tab 4 (4a fixed ground size / native pixel tiles, 4b rows and row tiles) and row detection |
 | `recipe.py` | `PlotExtractor_recipe.json`: the settings of every run, *Load recipe...* |
-| `qa.py` | Tab 7, quality checks |
-| `docs/` | User Guide and Technical Report (PDF), images, older presentation and demo scripts |
+| `qa.py` | Tab 4c, quality checks |
+| `docs/` | User Guide and Technical Report (PDF), images, `experiments/` (scripts and results), older presentation and demo scripts |
 | `THIRD_PARTY_NOTICES.md` | APPN-UQ MIT licence and Phase One SDK note |
 
 ## Acknowledgements
 
 The IIQ plot extraction follows the **PhaseOne_Pipeline of APPN, The University of
-Queensland** (appn@uq.edu.au; MIT licence) - tab 8 and the *8 · Acknowledgements*
+Queensland** (appn@uq.edu.au; MIT licence) - tab 5 and the *8 · Acknowledgements*
 section below list what we changed. IIQ files are developed with the **Phase One
 ImageSDK** (Copyright Phase One A/S, used under Phase One's licence; not redistributed
-here). Row detection follows the PhenoFuse method. Everything else was developed by
+here); raw sensor values are read with LibRaw (rawpy). Row detection and the crop-row tools follow PhenoFuse. Everything else was developed by
 DPIRD for the APPN node in Western Australia.
 
 ## Contributors

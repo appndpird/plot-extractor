@@ -79,6 +79,8 @@ def _iiq_developer(run_dir):
             info = json.load(f)
     except Exception:
         pass
+    if info.get("pixels") == "raw_sensor":
+        return iiq.RawSensor(), True          # sensor values: read again, exact
     settings = os.path.join(run_dir, "IIQ_settings_used.json")
     dev = iiq.Developer(settings, os.path.join(run_dir, "QA", "_iiq_work"),
                         info.get("sdk_root", ""), parallel=1)
@@ -93,6 +95,7 @@ def _iiq_developer(run_dir):
 
 def check_crops(run_dir, log=print, cancel=None, progress=None):
     import rasterio
+    import rasterio.windows
     from PIL import Image
     Image.MAX_IMAGE_PIXELS = None
     man = _read_csv(os.path.join(run_dir, "manifest.csv"))
@@ -126,9 +129,11 @@ def check_crops(run_dir, log=print, cancel=None, progress=None):
                 dev, neutral = cache["iiq"]
                 x0, y0, x1, y1 = (int(float(r[k])) for k in ("src_x0", "src_y0", "src_x1", "src_y1"))
                 with rasterio.open(p) as s:
-                    crop = s.read([1, 2, 3]).transpose(1, 2, 0)
+                    crop = s.read([1, 2, 3] if s.count >= 3 else [1]).transpose(1, 2, 0)
                 bits = 16 if crop.dtype == np.uint16 else 8
                 ref = dev.develop(r["source_path"], (x0, y0, x1 - x0, y1 - y0), bits=bits)
+                if ref.ndim == 2:                       # raw sensor values: one band
+                    ref = ref[..., None]
                 top = 65535 if bits == 16 else 255
                 tol = 2 * (257 if bits == 16 else 1)      # 2/255 at either depth
                 rec["bits"] = bits
@@ -156,20 +161,28 @@ def check_crops(run_dir, log=print, cancel=None, progress=None):
         else:
             try:
                 sp = r["source_path"]
-                if sp not in cache:
-                    cache.clear()
-                    with Image.open(sp) as im:
-                        cache[sp] = np.asarray(im.convert("RGB"))
-                src = cache[sp]
                 x0, y0, x1, y1 = (int(float(r[k])) for k in ("src_x0", "src_y0", "src_x1", "src_y1"))
-                ref = src[y0:y1, x0:x1]
                 with rasterio.open(p) as s:
                     crop = s.read([1, 2, 3]).transpose(1, 2, 0)
+                if sp.lower().endswith((".tif", ".tiff")):
+                    # TIFF sources (e.g. converted in tab 2, 8 or 16 bit): read the box
+                    with rasterio.open(sp) as d_:
+                        ref = d_.read([1, 2, 3], window=rasterio.windows.Window(
+                            x0, y0, x1 - x0, y1 - y0)).transpose(1, 2, 0)
+                    if ref.dtype != crop.dtype:          # 16-bit source, 8-bit crop
+                        ref = np.clip(np.round(ref.astype(np.float32) / 257.0), 0,
+                                      255).astype(crop.dtype)
+                else:
+                    if sp not in cache:
+                        cache.clear()
+                        with Image.open(sp) as im:
+                            cache[sp] = np.asarray(im.convert("RGB"))
+                    ref = cache[sp][y0:y1, x0:x1]
                 if ref.shape != crop.shape:
                     rec.update(result="FAIL", note=f"size {crop.shape} vs source box {ref.shape}")
                 else:
                     inside = crop.max(axis=2) > 0
-                    diff = np.abs(crop.astype(np.int16) - ref.astype(np.int16)).max(axis=2)
+                    diff = np.abs(crop.astype(np.int32) - ref.astype(np.int32)).max(axis=2)
                     n_in = int(inside.sum())
                     n_same = int((diff[inside] == 0).sum())
                     rec.update(inside_px=n_in, identical_px=n_same,
