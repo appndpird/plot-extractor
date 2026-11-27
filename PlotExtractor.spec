@@ -37,7 +37,7 @@ hidden += ["PIL.ImageTk", "PIL.ImageCms", "PIL._tkinter_finder",
            # the IIQ tabs (Phase One SDK via iiq_tools\p1tool.exe)
            "iiq",
            # crop rows (tab 1a / 1b) and the crop-row review tab (1c)
-           "crop_rows", "row_review",
+           "crop_rows", "row_review", "plot_detect",
            # raw sensor values of the IIQ (tab 3b) - LibRaw
            "rawpy", "rawpy._rawpy"]
 

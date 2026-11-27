@@ -1,0 +1,23 @@
+PASS 1a load ortho
+PASS 1a auto-detect ran  11.1 s
+PASS 1a plots drawn  128
+PASS 1a fields filled  4 x 32, 1.557 x 7.816 m, rows 7
+PASS 1a corners set
+PASS 1a saved grid
+PASS 1a saved confidence csv
+PASS 1a csv flags  54
+PASS 1a crop rows file
+PASS current grid set
+PASS 1b basemap = the 1a ortho
+PASS 1b editor loaded the grid
+PASS 1b list of plots to check  54
+PASS 1b Next selects a flagged plot  1020
+PASS 1b Next moves on
+PASS 1b Shift+N goes back
+PASS 1b Checked removes it
+PASS 1b saved edited grid
+PASS 1b list carried over
+PASS 1b checked plot leaves the list
+PASS 1b reopened edited grid keeps the list
+
+21 / 21 passed

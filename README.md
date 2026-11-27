@@ -61,7 +61,7 @@ single photo holds can be stitched from several photos instead.
 
 | # | Tab | What it does |
 |---|---|---|
-| 1 | **Plot Grid Generation** | **1a Generate grid**: the plot shapefile from the 4 trial corners and the layout, optionally with *Crop rows per plot* (`<grid>_rows.shp`). **1b Edit grid**: move, reshape, grow/shrink, width / length by metres or *W % / L %*, shift; *Correct grid to rows*; saves `<grid>_edited.shp` (rows follow). **1c Review crop rows**: make the row lines (fixed spacing from the count, or detected in the orthomosaic), review them plot by plot, move / add / delete / even-space rows, save. |
+| 1 | **Plot Grid Generation** | **1a Generate grid**: the plot shapefile from the 4 trial corners and the layout, optionally with *Crop rows per plot* (`<grid>_rows.shp`) - or **Auto-detect plots** (D): ranges, plots per range, plot size and crop rows found in the orthomosaic, each plot with a confidence (`<grid>_detect.csv`; low ones drawn orange). **1b Edit grid**: move, reshape, grow/shrink, width / length by metres or *W % / L %*, shift; *Correct grid to rows*; **Next to check** (N) / **Checked** (K) step through the plots Auto-detect was unsure of; saves `<grid>_edited.shp` (rows follow). **1c Review crop rows**: make the row lines (fixed spacing from the count, or detected in the orthomosaic), review them plot by plot, move / add / delete / even-space rows, save. |
 | 2 | **IIQ File Conversion** | Phase One IIQ raw files → TIFF (8/16 bit), GeoTIFF (georeferenced from the aligned cameras) or JPEG, with the Phase One ImageSDK. |
 | 3 | **Plot Extraction** | **3a From converted images (indirect)**: one image per plot cut from the JPEGs the project was aligned on or from frames converted in tab 2 (16-bit kept, other sizes scaled exactly), optional rectified / stitched and orthomosaic crops. **3b Direct from IIQ**: each plot's box developed from its IIQ (8/16 bit), or its raw sensor values. |
 | 4 | **Tiles Generation** | **4a Fixed ground size tiles** (metres, or native pixels); **4b Row-based tiles**: whole rows and same-size tiles along each row; **4c QA**: crops vs source, tiles vs crops, rows. |
@@ -83,6 +83,24 @@ and the georeferenced images of tabs 2 and 3. Each tab has an *Output CRS (EPSG)
 *Save in CRS* field for another code. When an orthomosaic is loaded in tab 1a or 1b, all
 these fields **follow the orthomosaic's CRS** (a lon/lat orthomosaic gives its local
 GDA2020 / MGA zone, 7850 at York).
+
+## Auto-detect plots (26-27 Nov 2026)
+
+Tab 1a finds the plots itself: click the 4 trial corners (recommended), press
+**Auto-detect plots** (D), check the orange plots in 1b with **Next to check**. Tested on
+three hand-checked grids ([`docs/experiments/2026-11-26_plot_autodetect`](docs/experiments/2026-11-26_plot_autodetect)):
+
+| Trial | Plots | Position error (median, across / along) | IoU | To check | Time |
+|---|---|---|---|---|---|
+| York 2026, mid-season | 252 / 252 | 2.3 / 8.6 cm | 0.92 | 0 | 13 s |
+| Northam 2026, early emergence (~1 % green) | 128 / 128 | 4.4 / 4.2 cm | 0.91 | 54 | 12 s |
+| York 2025, barely emerged | 36 / 36 | 6.5 cm / one plot end ~0.5 m | 0.75 | 16 | 2 s |
+
+It needs a gap between plots across the rows (bare or a green strip); for a trial drilled
+continuously across, tick *Auto-detect: use my counts and sizes* and give *Plots per range*.
+
+| ![Auto-detect, York 2026](docs/images/app_autodetect_york2026_1a.png) **1a · Auto-detect** (York 2026: 252 plots, none to check) | ![Next to check, Northam](docs/images/app_autodetect_northam_1b.png) **1b · Next to check** (Northam: the plot, its confidence and why) |
+|---|---|
 
 ## Keeping the original data (experiment, 10-11 Nov 2026)
 

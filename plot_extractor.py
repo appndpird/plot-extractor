@@ -3067,6 +3067,19 @@ def build_plot_editor(parent, plots_path, on_saved, log=lambda *_: None,
     id_field = pick_id_field(fields)
     ids = [safe_name(pl['props'].get(id_field, i + 1)) if id_field else str(i + 1)
            for i, pl in enumerate(plots)]
+    # Auto-detect (tab 1a): the plots to check, from <grid>_detect.csv - or from the
+    # grid this one was edited from (<grid>_edited.shp keeps its parent's list)
+    import plot_detect
+    chk = {'rep': {}, 'order': [], 'pos': -1, 'done': set()}
+    _p = plots_path
+    for _ in range(8):
+        chk['rep'] = plot_detect.read_report(plot_detect.report_path_for(_p))
+        _b, _e = os.path.splitext(_p)
+        if chk['rep'] or not _b.endswith('_edited'):
+            break
+        _p = _b[:-len('_edited')] + _e
+    chk['order'] = [i for i, pid in enumerate(ids)
+                    if pid in chk['rep'] and chk['rep'][pid][0] < plot_detect.FLAG_BELOW]
     allx = [p[0] for r in rings for p in r]
     ally = [p[1] for r in rings for p in r]
     geographic = max(abs(min(allx)), abs(max(allx)),
@@ -3214,8 +3227,9 @@ def build_plot_editor(parent, plots_path, on_saved, log=lambda *_: None,
                 sx, sy = w2s(x, y)
                 pts += [sx, sy]
             q = i in sel
-            cv.create_polygon(pts, outline='#ffcc33' if q else '#5fae3f',
-                              fill='', width=2 if q else 1)
+            tocheck = i in chk['order'] and i not in chk['done']
+            cv.create_polygon(pts, outline='#ffcc33' if q else ('#ff8c1a' if tocheck else '#5fae3f'),
+                              fill='', width=2 if (q or tocheck) else 1)
             cxp = sum(pts[0::2]) / (len(pts) // 2)
             cyp = sum(pts[1::2]) / (len(pts) // 2)
             cv.create_text(cxp, cyp, text=ids[i],
@@ -3546,6 +3560,56 @@ def build_plot_editor(parent, plots_path, on_saved, log=lambda *_: None,
         status.config(text=status_text(
             f"Shift {arrow} {abs(d):.2f} m -> {'selection' if sel else 'ALL'} ({len(idxs)})"))
 
+    # ---- Auto-detect review: step through the plots to check ----
+    def _left():
+        return [i for i in chk['order'] if i not in chk['done']]
+
+    def _chk_text():
+        if not chk['order']:
+            return "no Auto-detect list"
+        return f"{len(_left())} of {len(chk['order'])} to check"
+
+    def zoom_to(i):
+        """centre the view on plot i, about 3 plot lengths across"""
+        xs = [p[0] for p in rings[i]]
+        ys = [p[1] for p in rings[i]]
+        cx, cy = (min(xs) + max(xs)) / 2, (min(ys) + max(ys)) / 2
+        span = max((max(xs) - min(xs)), (max(ys) - min(ys)) * k, 1e-9)
+        w, h = cv.winfo_width() or 1100, cv.winfo_height() or 660
+        T['scale'] = min(w, h) / (3.0 * span)
+        T['ox'] = w / 2 - cx * T['scale']
+        T['oy'] = h / 2 + cy * T['scale'] * k
+
+    def next_check(d=1):
+        left = _left()
+        chk_lbl.config(text=_chk_text())
+        if not left:
+            status.config(text=status_text(
+                "No plots left to check" if chk['order'] else
+                "This grid has no Auto-detect list (tab 1a writes <grid>_detect.csv)"))
+            return
+        cur = next(iter(sel)) if len(sel) == 1 else None
+        if cur in left:
+            j = (left.index(cur) + d) % len(left)
+        else:
+            j = 0 if d > 0 else len(left) - 1
+        i = left[j]
+        sel.clear()
+        sel.add(i)
+        zoom_to(i)
+        redraw()
+        conf, why = chk['rep'].get(ids[i], (0.0, ''))
+        status.config(text=status_text(
+            f"Plot {ids[i]} ({j + 1} of {len(left)} to check, confidence {conf:.2f}): "
+            f"{why or 'low confidence'} - fix it, then Checked (K)"))
+
+    def mark_checked():
+        for i in list(sel):
+            if i in chk['order']:
+                chk['done'].add(i)
+        chk_lbl.config(text=_chk_text())
+        next_check(1)
+
     def pan_by(dx, dy):
         T['ox'] += dx
         T['oy'] += dy
@@ -3720,6 +3784,20 @@ def build_plot_editor(parent, plots_path, on_saved, log=lambda *_: None,
                         "edited plots; detected / edited rows kept on the ground - review in 1c)")
         except Exception as e:
             log(f"[!] crop rows not carried over: {e}")
+        if chk['rep']:
+            # the Auto-detect list goes with the edited grid; checked plots leave it
+            try:
+                outr = []
+                for i, pid in enumerate(ids):
+                    conf, why = chk['rep'].get(pid, (1.0, ''))
+                    if i in chk['done']:
+                        conf, why = 1.0, "checked in 1b"
+                    outr.append({'props': {'Plot_ID': pid, 'Range': '', 'Row': ''},
+                                 'conf': conf, 'flags': [why] if why else [],
+                                 'cover': None, 'shift_across_m': None, 'shift_along_m': None})
+                plot_detect.write_report(plot_detect.report_path_for(outp), {'plots': outr})
+            except Exception as e:
+                log(f"[!] Auto-detect list not carried over: {e}")
         on_saved(outp)
         if not quiet:
             messagebox.showinfo("Edit plots",
@@ -3754,6 +3832,11 @@ def build_plot_editor(parent, plots_path, on_saved, log=lambda *_: None,
     tool("Basemap", "RGB ortho .tif", load_basemap, w=9)
     tool("Reset all", "Ctrl+Z", reset_all, w=9)
     tool("Save & use", "S", save, w=10)
+    tool("Next to check ▶", "N  (Shift+N back)", lambda: next_check(1), w=15)
+    tool("Checked ✓", "K", mark_checked, w=10)
+    chk_lbl = ttk.Label(tb['f'], text=_chk_text(),
+                        foreground='#c05a00' if chk['order'] else '#888')
+    chk_lbl.pack(side='left', padx=6)
     tb['f'] = rows_[1]
     sf = ttk.Frame(tb['f'])
     sf.pack(side='left', padx=(3, 3))
@@ -3807,6 +3890,10 @@ def build_plot_editor(parent, plots_path, on_saved, log=lambda *_: None,
         kb.bind(kk, lambda e: (fit(), redraw()))
     for kk in ('<KeyPress-s>', '<KeyPress-S>'):
         kb.bind(kk, lambda e: save())
+    kb.bind('<KeyPress-n>', lambda e: next_check(1))
+    kb.bind('<KeyPress-N>', lambda e: next_check(-1))
+    for kk in ('<KeyPress-k>', '<KeyPress-K>'):
+        kb.bind(kk, lambda e: mark_checked())
     for kk in ('+', '=', '<KP_Add>'):
         kb.bind(kk, lambda e: do_buffer(_step()))
     for kk in ('-', '<KP_Subtract>'):
@@ -3835,7 +3922,8 @@ def build_plot_editor(parent, plots_path, on_saved, log=lambda *_: None,
     win.api = dict(select_all=select_all, clear=clear_sel, buffer=do_buffer, axis=do_axis,
                    shift=do_shift, reset=reset_all, save=save, load_basemap=load_basemap,
                    pct=do_pct, pct_w=pct_w, pct_l=pct_l,
-                   rings=rings, sel=sel, wl=_wl, basemap=bm)
+                   rings=rings, sel=sel, wl=_wl, basemap=bm,
+                   next_check=next_check, mark_checked=mark_checked, checks=chk, ids=ids)
     return win
 
 
@@ -3855,7 +3943,7 @@ def main():
             cfg = {}
 
     root = tk.Tk()
-    root.title("Plot Extractor 2026.11.10 — raw image per plot")
+    root.title("Plot Extractor 2026.11.26 — raw image per plot")
     root.geometry("1100x780")
     root.minsize(980, 640)
 
@@ -4608,6 +4696,13 @@ def main():
     # Builds the plot shapefile by clicking the 4 trial corners on an
     # orthomosaic; "Save & use" feeds it straight back into the form above.
     def _use_grid(path):
+        # 1b / 1c show the grid on the orthomosaic it was made on in 1a
+        try:
+            o = gd.designer.src['path']
+            if o and os.path.exists(o):
+                vars_['edit_basemap'].set(o)
+        except Exception:
+            pass
         set_grid(path, "new grid from tab 1a")
         nb.select(tab_grid_top)
         nb_grid.select(tab_edit)
@@ -4821,7 +4916,7 @@ def _selftest():
     ok = True
     for m in ("numpy", "PIL", "PIL.ImageCms", "PIL.ImageTk", "rasterio",
               "rasterio.features", "rasterio.warp", "shapefile", "shapely.geometry",
-              "rawpy", "crop_rows", "row_review", "row_detect", "tiler", "qa", "iiq"):
+              "rawpy", "crop_rows", "row_review", "plot_detect", "row_detect", "tiler", "qa", "iiq"):
         try:
             __import__(m); print(f"  [ok] {m}")
         except Exception as e:

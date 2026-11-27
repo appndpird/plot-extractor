@@ -1,0 +1,73 @@
+Auto-detect: orthomosaic read at 2.0 cm, 30.6 % green (ExG > 0.122)
+  rows run at 117.36 deg from east (row signal 1.4x background)
+  plots every 1.82 m across the rows (gaps show as bare strips)
+  ranges every 6.08 m, plots 4.13 m long (from soil darkness)
+  12 ranges x 21 plots per range
+  6 crop rows per plot every 25.7 cm (21 of 21 columns agree)
+  252 plots, 1.541 m wide x 4.134 m long; 0 to check (confidence < 0.5); 13.4 s
+{"n_ranges": 12, "n_cols": 21, "plot_w": 1.541, "plot_l": 4.134, "gap_across": 0.279, "gap_along": 1.946, "range_pitch": 6.08, "plot_pitch": 1.82, "row_pitch": 0.2568, "crop_rows": 6, "angle_deg": 117.359, "direction_clarity": 1.35, "continuous": false, "step_m": 0.02, "green_share": 0.3062, "n_flagged": 0, "seconds": 13.4}
+york2026 quad=True: ref 252, detected 252, matched 252, extra 0, 13.5 s
+  across    median   +0.4 cm  |abs| median   2.3  p90   5.7  max  11.7
+  along     median   -6.1 cm  |abs| median   8.6  p90  15.7  max  49.8
+  d_width   median   -2.0 cm  |abs| median   2.0  p90   2.2  max   2.3
+  d_length  median   +8.1 cm  |abs| median   8.1  p90   8.4  max   8.5
+  IoU median 0.920  min 0.766
+  worst: 7011 a+50 c+2; 10021 a+34 c-4; 8001 a-19 c+7; 10006 a-23 c+1; 10013 a-21 c+3; 5013 a-22 c-1; 8002 a-21 c-2; 10002 a-20 c-2; 12013 a-15 c+6; 11019 a-12 c+9
+  unmatched ref: []
+  flagged 0: 
+
+Auto-detect: orthomosaic read at 2.0 cm, 2.9 % green (ExG > 0.059)
+  rows run at 115.99 deg from east (row signal 1.2x background)
+  plots every 2.00 m across the rows (gaps show as green strips)
+  ranges every 10.02 m, plots 7.82 m long (from soil darkness)
+  4 ranges x 32 plots per range
+  7 crop rows per plot every 22.2 cm (21 of 32 columns agree)
+  128 plots, 1.557 m wide x 7.816 m long; 54 to check (confidence < 0.5); 11.5 s
+{"n_ranges": 4, "n_cols": 32, "plot_w": 1.557, "plot_l": 7.816, "gap_across": 0.443, "gap_along": 2.204, "range_pitch": 10.02, "plot_pitch": 2.0, "row_pitch": 0.2225, "crop_rows": 7, "angle_deg": 115.993, "direction_clarity": 1.18, "continuous": false, "step_m": 0.02, "green_share": 0.029, "n_flagged": 54, "seconds": 11.5}
+northam quad=True: ref 128, detected 128, matched 123, extra 5, 11.6 s
+  across    median   -3.3 cm  |abs| median   4.4  p90  58.0  max  68.9
+  along     median   -0.7 cm  |abs| median   4.2  p90   8.6  max  61.7
+  d_width   median   -4.6 cm  |abs| median   4.6  p90   4.6  max   4.6
+  d_length  median  -14.6 cm  |abs| median  14.6  p90  36.6  max  36.6
+  IoU median 0.913  min 0.381
+  worst: 1005 a-52 c-49; 4003 a+18 c-69; 4002 a+22 c-62; 4004 a+14 c-68; 3011 a-16 c-60; 3008 a+14 c-59; 4001 a+6 c-64; 4008 a+1 c-67; 2005 a+2 c+66; 1004 a-2 c-66
+  unmatched ref: ['1009', '4007', '4011', '4012', '4013']
+  flagged 54: 1020 side unclear,101 cm out of line along; 1021 side unclear - placed in line,93 cm out of line along; 1022 side unclear,79 cm out of line along; 1023 side unclear; 1026 side unclear,95 cm out of line along; 1027 side unclear; 1031 ; 2020 side unclear,20 cm out of line across; 2021 side unclear - placed in line; 3001 side unclear - placed in line; 3002 side unclear - placed in line; 3003 side unclear - placed in line
+
+Auto-detect: orthomosaic read at 2.0 cm, 2.8 % green (ExG > 0.050)
+  rows run at 117.52 deg from east (row signal 1.4x background)
+  plots every 1.26 m across the rows (gaps show as bare strips)
+  ranges every 5.94 m, plots 5.35 m long (from row amplitude)
+  6 ranges x 6 plots per range
+  5 crop rows per plot every 21.0 cm (6 of 6 columns agree)
+  36 plots, 1.048 m wide x 5.346 m long; 16 to check (confidence < 0.5); 2.1 s
+{"n_ranges": 6, "n_cols": 6, "plot_w": 1.048, "plot_l": 5.346, "gap_across": 0.212, "gap_along": 0.594, "range_pitch": 5.94, "plot_pitch": 1.26, "row_pitch": 0.2095, "crop_rows": 5, "angle_deg": 117.518, "direction_clarity": 1.35, "continuous": false, "step_m": 0.02, "green_share": 0.0278, "n_flagged": 16, "seconds": 2.1}
+york2025 quad=True: ref 36, detected 36, matched 20, extra 16, 2.1 s
+  across    median   -5.6 cm  |abs| median   6.5  p90  10.9  max  12.1
+  along     median  +35.4 cm  |abs| median  41.0  p90  51.5  max  53.1
+  d_width   median   -6.4 cm  |abs| median   6.4  p90   9.5  max  11.4
+  d_length  median  +81.1 cm  |abs| median  81.1  p90  94.2  max 103.8
+  IoU median 0.746  min 0.674
+  worst: 6001 a+50 c-11; 6003 a+51 c-8; 1001 a-53 c+5; 3005 a+51 c-4; 5005 a+53 c-2; 1006 a+48 c-6; 5001 a+41 c-12; 6006 a+45 c-6; 3003 a+42 c-8; 1002 a-42 c+7
+  unmatched ref: ['6005', '6002', '4001', '4005', '4003', '4002', '3006', '3004', '3002', '3001', '2006', '2005', '2003', '2002', '2001', '1005']
+  flagged 16: 1001 side unclear; 1003 30 cm out of line along; 1004 25 cm out of line along; 1005 33 cm out of line along; 2001 side unclear; 2004 44 cm out of line along; 2005 35 cm out of line along; 2006 side unclear; 3001 side unclear; 4001 side unclear; 4004 47 cm out of line along; 5001 side unclear
+
+Auto-detect: orthomosaic read at 2.0 cm, 29.1 % green (ExG > 0.126)
+  rows run at 117.38 deg from east (row signal 7.2x background)
+  plots every 1.82 m across the rows (gaps show as bare strips)
+  ranges every 6.08 m, plots 4.13 m long (from soil darkness)
+  22 ranges x 27 plots per range
+  6 crop rows per plot every 25.7 cm (23 of 27 columns agree)
+  outer ranges / columns without crop left out: 12 x 25 plots kept
+  300 plots, 1.542 m wide x 4.134 m long; 46 to check (confidence < 0.5); 31.1 s
+{"n_ranges": 12, "n_cols": 25, "plot_w": 1.542, "plot_l": 4.134, "gap_across": 0.278, "gap_along": 1.946, "range_pitch": 6.08, "plot_pitch": 1.82, "row_pitch": 0.257, "crop_rows": 6, "angle_deg": 117.38, "direction_clarity": 7.25, "continuous": false, "step_m": 0.02, "green_share": 0.2909, "n_flagged": 46, "seconds": 31.1}
+york2026 quad=False: ref 252, detected 300, matched 252, extra 48, 31.2 s
+  across    median   +0.4 cm  |abs| median   2.2  p90   5.6  max  11.3
+  along     median   -5.7 cm  |abs| median   8.8  p90  17.0  max  48.9
+  d_width   median   -1.9 cm  |abs| median   1.9  p90   2.1  max   2.2
+  d_length  median   +8.1 cm  |abs| median   8.1  p90   8.4  max   8.5
+  IoU median 0.920  min 0.762
+  worst: 7011 a+49 c+3; 10021 a+34 c+5; 12002 a-24 c-3; 10013 a-21 c+4; 10006 a-25 c-0; 12013 a-18 c+7; 8002 a-22 c-2; 5013 a-23 c-1; 12008 a-23 c+1; 7002 a-19 c-3
+  unmatched ref: []
+  flagged 46: 1001 side unclear; 1003 little crop (empty or failed plot?),side unclear,11 cm out of line across; 1004 little crop (empty or failed plot?),side unclear,13 cm out of line across; 2001 side unclear; 2003 little crop (empty or failed plot?),side unclear,13 cm out of line across,70 cm out of line along; 2004 little crop (empty or failed plot?),side unclear,13 cm out of line across,71 cm out of line along; 3001 side unclear; 3002 little crop (empty or failed plot?),side unclear; 3003 little crop (empty or failed plot?),side unclear,18 cm out of line across; 4001 side unclear; 4002 little crop (empty or failed plot?),side unclear,73 cm out of line along; 4003 little crop (empty or failed plot?),side unclear - placed in line,70 cm out of line along
+

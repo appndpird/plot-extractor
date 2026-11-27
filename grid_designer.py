@@ -32,6 +32,9 @@ CLICK_ORDERS = {
 # slower usually means a striped GeoTIFF with no overviews.
 SLOW_READ_S = 6.0
 
+# Auto-detect confidence below this = "check this plot" (plot_detect.FLAG_BELOW)
+CHECK_BELOW = 0.5
+
 
 # --------------------------------------------------------------------------
 # Grid maths (ported from phenoapp/core/grid_gen.py, shapely-free)
@@ -343,6 +346,8 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
     v_grange = tk.StringVar(value='0.50')
     v_crop = tk.StringVar(value='0')          # crop (seeder) rows inside each plot
     v_epsg = out_epsg_var if out_epsg_var is not None else tk.StringVar(value='7850')
+    v_mine = tk.BooleanVar(value=False)       # Auto-detect: use the counts/sizes above
+    det = {'result': None, 'running': False}  # last Auto-detect result (grid came from it)
 
     def _err(title, msg):
         """Report a failure through both sinks; dialogs are skippable so the
@@ -473,7 +478,10 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
                 for x, y in pl['ring']:
                     sx, sy = w2s(x, y)
                     pts += [sx, sy]
-                cv.create_polygon(pts, outline='#33ddee', fill='', width=1)
+                # Auto-detect: the plots to check (low confidence) in orange
+                check = pl.get('conf', 1.0) < CHECK_BELOW
+                cv.create_polygon(pts, outline='#ff8c1a' if check else '#33ddee', fill='',
+                                  width=2 if check else 1)
             for a, b in crop_lines():
                 (ax, ay), (bx, by) = w2s(*a), w2s(*b)
                 cv.create_line(ax, ay, bx, by, fill='#ffd23f', width=1)
@@ -669,6 +677,7 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
             return False
         del grid[:]
         grid.extend(plots)
+        det['result'] = None                  # a regular grid replaces a detected one
         ws, ls = [], []
         for pl in plots:
             w, l = measure_plot_size(pl['ring'], src['mpx'], src['mpy'])
@@ -682,6 +691,104 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
                 % (n, 100.0 * sum(ws) / len(ws) / n)) if n else ''))
         redraw()
         return True
+
+    # ---- Auto-detect -----------------------------------------------------
+    def _apply_detection(res):
+        """Show a plot_detect result: the plots (orange = check), the layout in the
+        fields and the trial corners, so Preview / Save behave as after a manual grid."""
+        info = res['info']
+        del grid[:]
+        grid.extend(res['plots'])
+        det['result'] = res
+        if not v_mine.get():
+            v_ranges.set(str(info['n_ranges']))
+            v_rows.set(str(info['n_cols']))
+            v_pw.set('%.3f' % info['plot_w'])
+            v_pl.set('%.3f' % info['plot_l'])
+            v_grow.set('%.3f' % info['gap_across'])
+            v_grange.set('%.3f' % info['gap_along'])
+            if info.get('crop_rows'):
+                v_crop.set(str(info['crop_rows']))
+        # the trial corners in the current click order (BL BR TR TL from the detector)
+        by = dict(zip(('BL', 'BR', 'TR', 'TL'), res['quad']))
+        del corners[:]
+        corners.extend(by[k] for k in labels())
+        n_chk = info['n_flagged']
+        say("Auto-detect: %d plots (%d ranges x %d), %.2f x %.2f m%s; %d to check (orange) "
+            "- %.0f s. Save & use, then step through them in 1b (Next to check)."
+            % (len(grid), info['n_ranges'], info['n_cols'], info['plot_w'], info['plot_l'],
+               (", %d crop rows" % info['crop_rows']) if info.get('crop_rows') else '',
+               n_chk, info['seconds']))
+        redraw()
+
+    def auto_detect(wait=False):
+        """Find the plots in the loaded orthomosaic (plot_detect). With 4 corners
+        clicked, only inside them (recommended: other trials stay out and the
+        numbering starts at BL). Runs in a thread; wait=True blocks (tests)."""
+        if det['running']:
+            return None
+        if not src['path']:
+            _err("Auto-detect", "Load the orthomosaic first.")
+            return None
+        quad = ordered_corners()
+        if corners and quad is None:
+            _err("Auto-detect", "Click all 4 trial corners, or clear them (Esc) to "
+                                "search the whole orthomosaic.")
+            return None
+        kw = {}
+        if v_mine.get():
+            kw = dict(n_ranges=_num(v_ranges, 0, int), n_cols=_num(v_rows, 0, int),
+                      plot_w=_num(v_pw, 0.0), plot_l=_num(v_pl, 0.0))
+        import queue
+        import threading
+        q = queue.Queue()
+
+        def work():
+            import plot_detect
+            try:
+                r = plot_detect.detect_plots(
+                    src['path'], quad, log=lambda m: q.put(('log', m)),
+                    progress=lambda f, m: q.put(('prog', (f, m))), **kw)
+                q.put(('done', r))
+            except Exception as e:                       # DetectError says what to do
+                q.put(('error', str(e)))
+
+        det['running'] = True
+        btns["Auto-detect plots"].state(['disabled'])
+        say("Auto-detect: reading the orthomosaic%s..."
+            % (" inside the 4 corners" if quad else " (no corners: the whole image)"))
+        th = threading.Thread(target=work, daemon=True)
+        th.start()
+        out = {}
+
+        def poll():
+            while True:
+                try:
+                    kind, val = q.get_nowait()
+                except queue.Empty:
+                    break
+                if kind == 'log':
+                    log(val)
+                elif kind == 'prog':
+                    st['msg'] = "Auto-detect %d %%: %s" % (int(100 * val[0]), val[1])
+                    status.config(text=status_text())
+                else:
+                    det['running'] = False
+                    btns["Auto-detect plots"].state(['!disabled'])
+                    if kind == 'done':
+                        out['r'] = val
+                        _apply_detection(val)
+                    else:
+                        out['err'] = val
+                        _err("Auto-detect", val)
+                    return
+            frame.after(150, poll)
+        if wait:
+            th.join()
+            poll()
+            return out.get('r')
+        frame.after(150, poll)
+        return None
 
     # ---- saving ----------------------------------------------------------
     def default_out():
@@ -736,6 +843,13 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
                                           prj_from=path)
                 log("Crop rows: %d per plot at %.2f cm -> %s (review / edit them in tab "
                     "1c)" % (n, 100.0 * sorted(pit)[len(pit) // 2], rp))
+            if det['result'] is not None and plots is grid:
+                import plot_detect
+                rp = plot_detect.write_report(plot_detect.report_path_for(path),
+                                              {'plots': plots})
+                n_chk = sum(1 for pl in plots if pl.get('conf', 1.0) < CHECK_BELOW)
+                log("Auto-detect confidence per plot -> %s (%d to check: tab 1b, "
+                    "'Next to check')" % (rp, n_chk))
         except Exception as e:
             _err("Save grid", "Could not save the grid:\n%s" % e)
             return None
@@ -821,6 +935,7 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
     tool("Undo corner", "Ctrl+Z", undo_corner, w=11)
     tool("Clear corners", "Esc", clear_corners, w=12)
     tool("Fit view", "F", lambda: (fit(), redraw()), w=8)
+    tool("Auto-detect plots", "D", lambda: auto_detect(), w=16)
     tool("Preview grid", "G", preview, w=11)
     tool("Save shapefile", "Ctrl+S", lambda: save(False), w=13)
     tool("Save & use", "S", lambda: save(True), w=10)
@@ -844,8 +959,12 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
     ttk.Label(fcr, text="Crop rows per plot (0 = none)", font=('Segoe UI', 8)).pack(anchor='w')
     ttk.Spinbox(fcr, textvariable=v_crop, from_=0, to=60, increment=1, width=5,
                 command=lambda: redraw()).pack(anchor='w')
-    ttk.Checkbutton(params, text="Stretch grid to fit the 4 clicked corners",
-                    variable=fit_var).pack(side='left', padx=(4, 0))
+    fck = ttk.Frame(params)
+    fck.pack(side='left', padx=(4, 0))
+    ttk.Checkbutton(fck, text="Stretch grid to fit the 4 clicked corners",
+                    variable=fit_var).pack(anchor='w')
+    ttk.Checkbutton(fck, text="Auto-detect: use my counts and sizes",
+                    variable=v_mine).pack(anchor='w')
     fe = ttk.Frame(params)
     fe.pack(side='left', padx=(14, 0))
     ttk.Label(fe, text="Save in CRS (EPSG)", font=('Segoe UI', 8)).pack(anchor='w')
@@ -876,6 +995,8 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
         cv.bind(kk, lambda e: (fit(), redraw()))
     for kk in ('<KeyPress-g>', '<KeyPress-G>'):
         cv.bind(kk, lambda e: preview())
+    for kk in ('<KeyPress-d>', '<KeyPress-D>'):
+        cv.bind(kk, lambda e: auto_detect())
     for kk in ('<KeyPress-s>', '<KeyPress-S>'):
         cv.bind(kk, lambda e: save(True))
     for kk in ('<KeyPress-p>', '<KeyPress-P>'):
@@ -891,15 +1012,17 @@ def build_grid_designer(parent, on_saved=None, log=print, ortho_path='',
         vars={'order': order_var, 'pan_mode': pan_mode, 'fit': fit_var,
               'ranges': v_ranges, 'rows': v_rows, 'plot_w': v_pw,
               'plot_l': v_pl, 'gap_row': v_grow, 'gap_range': v_grange,
-              'epsg': v_epsg, 'crop_rows': v_crop},
+              'epsg': v_epsg, 'crop_rows': v_crop, 'use_mine': v_mine},
         load_ortho=load_ortho, preview=preview, save=save,
+        auto_detect=auto_detect, detection=det,
         build_grid=build_grid, add_corner=add_corner,
         clear_corners=clear_corners, undo_corner=undo_corner,
         fit=fit, redraw=redraw, w2s=w2s, s2w=s2w, zoom_at=zoom_at,
         ordered_corners=ordered_corners, log=log)
     frame.designer = designer
 
-    say("Load an orthomosaic, then click the 4 trial corners")
+    say("Load an orthomosaic, then click the 4 trial corners - and Preview the grid, or "
+        "Auto-detect the plots (D)")
     if ortho_path:
         frame.after(60, lambda: load_ortho(ortho_path))
     else:
